@@ -18,7 +18,7 @@ from .supa import (
     month_start_utc,
 )
 
-app = FastAPI(title="Creator AI Backend", version="0.3.6")
+app = FastAPI(title="Creator AI Backend", version="0.3.7")
 
 # CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(
@@ -59,7 +59,7 @@ class GenerateIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.6"}
+    return {"ok": True, "version": "0.3.7"}
 
 # ---- Credits (mit Fallback 50) ----
 @app.get("/api/v1/credits")
@@ -103,8 +103,8 @@ def get_credits(authorization: str | None = Header(default=None)):
     }
 
 # ---- POST Generate (Brand-Voice + Credits + LLM-Switch) ----
-@app.post("/api/v1/generate")
-def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None), response: Response | None = None):
+@app.post("/api/v1/generate", response_model=None)
+def api_generate(payload: GenerateIn, response: Response, authorization: str | None = Header(default=None)):
     # --- Auth + Credits defensiv ---
     user_id = None
     if authorization and authorization.lower().startswith("bearer "):
@@ -115,7 +115,6 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
         except Exception:
             user_id = None
 
-    limit, used = 50, 0
     if user_id:
         try:
             prof = get_profile(user_id) or {}
@@ -128,8 +127,8 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
             except Exception:
                 pass
         except Exception:
-            # Credits-System gestört -> fail-open mit Default-Limit
-            limit, used = 50, 0
+            # Credits-System gestört -> fail-open
+            pass
 
     # --- Brand-Voice defensiv ---
     voice = None
@@ -162,8 +161,7 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
                 payload.tone.strip(),
                 voice,
             )
-            if response is not None:
-                response.headers["X-Engine"] = "llm"
+            response.headers["X-Engine"] = "llm"
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "type": payload.type,
@@ -171,7 +169,7 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
                 "engine": "llm",
             }
         except Exception:
-            # Silent fallthrough → lokaler Generator
+            # Silent fallthrough → local
             pass
 
     # --- Lokaler Fallback (kostenlos) ---
@@ -183,26 +181,26 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
             payload.tone.strip(),
             voice,
         )
-        if response is not None:
-            response.headers["X-Engine"] = "local"
+        response.headers["X-Engine"] = "local"
         result["engine"] = "local"
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---- GET-Fallback ohne Body/Token (debug; zieht KEINE Credits) ----
-@app.get("/api/v1/generate_simple")
+# ---- GET-Fallback (debug; KEINE Credits) ----
+@app.get("/api/v1/generate_simple", response_model=None)
 def api_generate_simple(
     type: str = Query(..., pattern="^(hook|script|caption|hashtags)$"),
     topic: str = Query(..., min_length=2),
     niche: str = Query("allgemein"),
     tone: str = Query("locker"),
-    response: Response | None = None,
+    response: Response = None,  # <-- nur wenn du willst: Response hier auch nicht optional machen
 ):
+    # ACHTUNG: Falls FastAPI meckert, einfach 'response: Response' ohne Default benutzen.
+    response = response or Response()
     try:
         result = generate(type, topic.strip(), niche.strip(), tone.strip())
-        if response is not None:
-            response.headers["X-Engine"] = "local"
+        response.headers["X-Engine"] = "local"
         result["engine"] = "local"
         return result
     except ValueError as e:
