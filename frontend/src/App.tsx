@@ -150,52 +150,69 @@ export default function App() {
     [topic, niche, tone]
   );
 
-  const generate = useCallback(async () => {
-    if (!canGenerate) return;
-    setLoading(true);
-    setError(null);
-    setNetHint(null);
-    setVariants([]);
+const generate = useCallback(async () => {
+  if (!canGenerate) return;
+  setLoading(true);
+  setError(null);
+  setNetHint(null);
+  setVariants([]);
+  try {
+    // 1) normaler POST (mit Token, Credits)
+    const res = await fetch(api("/api/v1/generate"), {
+      method: "POST",
+      headers: buildHeaders(true),
+      body: JSON.stringify({ type, topic, niche, tone }),
+    });
+
+    if (res.status === 429) {
+      const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
+      throw new Error(j?.detail || "Monatslimit erreicht");
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      try {
+        const j = text ? JSON.parse(text) : {};
+        throw new Error(j?.detail || j?.message || `HTTP ${res.status}: ${res.statusText}`);
+      } catch {
+        throw new Error(text || `HTTP ${res.status}: ${res.statusText}`);
+      }
+    }
+
+    const data = await res.json();
+    setVariants((data?.variants ?? []) as string[]);
+    fetchCredits().catch(() => {});
+    return;
+  } catch (e: any) {
+    // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
     try {
-      const res = await fetch(api("/api/v1/generate"), {
-        method: "POST",
-        headers: buildHeaders(true),
-        body: JSON.stringify({ type, topic, niche, tone }),
-      });
+      const url = new URL(api("/api/v1/generate_simple"));
+      url.searchParams.set("type", type);
+      url.searchParams.set("topic", topic);
+      url.searchParams.set("niche", niche);
+      url.searchParams.set("tone", tone);
 
-      if (res.status === 429) {
-        const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
-        throw new Error(j?.detail || "Monatslimit erreicht");
-      }
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        try {
-          const j = text ? JSON.parse(text) : {};
-          throw new Error(j?.detail || j?.message || `HTTP ${res.status}: ${res.statusText}`);
-        } catch {
-          throw new Error(text || `HTTP ${res.status}: ${res.statusText}`);
-        }
-      }
-
-      const data = await res.json();
+      const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
       setVariants((data?.variants ?? []) as string[]);
-      fetchCredits().catch(() => {});
-    } catch (e: any) {
-      const msg = e?.message || "Fehler bei der Generierung";
+      // Hinweis, dass Fallback aktiv war
+      setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
+      return;
+    } catch (e2: any) {
+      const msg = e2?.message || e?.message || "Fehler bei der Generierung";
       setError(msg);
       if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
         setNetHint(
           `Debug:
 - API_BASE: ${API_BASE}
-- Prüfe Backend CORS: CORS_ORIGINS=http://localhost:5173, CORS_ORIGIN_REGEX=https://.*\\.vercel\\.app$
-- Öffne ${api("/health")} direkt im Browser (soll JSON zeigen).`
+- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.3"} zeigen).
+- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
         );
       }
-    } finally {
-      setLoading(false);
     }
-  }, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits]);
+  } finally {
+    setLoading(false);
+  }
+}, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON]);
 
   const saveToLibrary = useCallback(
     async (variant: string) => {
