@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
+import Settings from "./Settings";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -30,6 +31,9 @@ export default function App() {
   const [busySaveId, setBusySaveId] = useState<number | null>(null);
 
   const [credits, setCredits] = useState<Credits>({ limit: 0, used: 0, remaining: 0, authenticated: false });
+
+  // NEW: Settings Toggle
+  const [showSettings, setShowSettings] = useState(false);
 
   // ---- Helper: Headers immer als Record<string,string> bauen ----
   const buildHeaders = useCallback(
@@ -150,69 +154,69 @@ export default function App() {
     [topic, niche, tone]
   );
 
-const generate = useCallback(async () => {
-  if (!canGenerate) return;
-  setLoading(true);
-  setError(null);
-  setNetHint(null);
-  setVariants([]);
-  try {
-    // 1) normaler POST (mit Token, Credits)
-    const res = await fetch(api("/api/v1/generate"), {
-      method: "POST",
-      headers: buildHeaders(true),
-      body: JSON.stringify({ type, topic, niche, tone }),
-    });
-
-    if (res.status === 429) {
-      const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
-      throw new Error(j?.detail || "Monatslimit erreicht");
-    }
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      try {
-        const j = text ? JSON.parse(text) : {};
-        throw new Error(j?.detail || j?.message || `HTTP ${res.status}: ${res.statusText}`);
-      } catch {
-        throw new Error(text || `HTTP ${res.status}: ${res.statusText}`);
-      }
-    }
-
-    const data = await res.json();
-    setVariants((data?.variants ?? []) as string[]);
-    fetchCredits().catch(() => {});
-    return;
-  } catch (e: any) {
-    // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
+  const generate = useCallback(async () => {
+    if (!canGenerate) return;
+    setLoading(true);
+    setError(null);
+    setNetHint(null);
+    setVariants([]);
     try {
-      const url = new URL(api("/api/v1/generate_simple"));
-      url.searchParams.set("type", type);
-      url.searchParams.set("topic", topic);
-      url.searchParams.set("niche", niche);
-      url.searchParams.set("tone", tone);
+      // 1) normaler POST (mit Token, Credits)
+      const res = await fetch(api("/api/v1/generate"), {
+        method: "POST",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ type, topic, niche, tone }),
+      });
 
-      const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
-      setVariants((data?.variants ?? []) as string[]);
-      // Hinweis, dass Fallback aktiv war
-      setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
-      return;
-    } catch (e2: any) {
-      const msg = e2?.message || e?.message || "Fehler bei der Generierung";
-      setError(msg);
-      if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
-        setNetHint(
-          `Debug:
-- API_BASE: ${API_BASE}
-- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.3"} zeigen).
-- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
-        );
+      if (res.status === 429) {
+        const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
+        throw new Error(j?.detail || "Monatslimit erreicht");
       }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        try {
+          const j = text ? JSON.parse(text) : {};
+          throw new Error(j?.detail || j?.message || `HTTP ${res.status}: ${res.statusText}`);
+        } catch {
+          throw new Error(text || `HTTP ${res.status}: ${res.statusText}`);
+        }
+      }
+
+      const data = await res.json();
+      setVariants((data?.variants ?? []) as string[]);
+      fetchCredits().catch(() => {});
+      return;
+    } catch (e: any) {
+      // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
+      try {
+        const url = new URL(api("/api/v1/generate_simple"));
+        url.searchParams.set("type", type);
+        url.searchParams.set("topic", topic);
+        url.searchParams.set("niche", niche);
+        url.searchParams.set("tone", tone);
+
+        const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
+        setVariants((data?.variants ?? []) as string[]);
+        // Hinweis, dass Fallback aktiv war
+        setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
+        return;
+      } catch (e2: any) {
+        const msg = e2?.message || e?.message || "Fehler bei der Generierung";
+        setError(msg);
+        if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
+          setNetHint(
+            `Debug:
+- API_BASE: ${API_BASE}
+- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.4"} zeigen).
+- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
+          );
+        }
+      }
+    } finally {
+      setLoading(false);
     }
-  } finally {
-    setLoading(false);
-  }
-}, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON]);
+  }, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON]);
 
   const saveToLibrary = useCallback(
     async (variant: string) => {
@@ -294,8 +298,7 @@ const generate = useCallback(async () => {
     );
   }
 
- const limitReached = credits.authenticated && credits.limit > 0 && credits.remaining <= 0;
-
+  const limitReached = credits.authenticated && credits.limit > 0 && credits.remaining <= 0;
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
@@ -312,6 +315,10 @@ const generate = useCallback(async () => {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* NEW: Settings-Button im Header */}
+          <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
+            {showSettings ? "Close Settings" : "Settings"}
+          </button>
           <CreditBadge />
           <button onClick={logout} className="px-3 py-1 rounded-lg border text-sm">
             Logout
@@ -320,6 +327,13 @@ const generate = useCallback(async () => {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
+        {/* NEW: Settings-Panel über den Tabs */}
+        {showSettings && (
+          <div className="mb-6">
+            <Settings />
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex gap-2 mb-4">
           <Tab k="hook" label="Hooks" />

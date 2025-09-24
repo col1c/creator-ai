@@ -62,3 +62,11 @@ def log_usage(user_id: str, event: str, meta: dict | None = None):
     with httpx.Client(timeout=12.0) as c:
         r = c.post(url, headers=_admin_headers(), json=payload)
         r.raise_for_status()
+
+def get_profile_full(user_id: str) -> dict:
+    url = f"{SUPABASE_URL}/rest/v1/users_public?select=handle,niche,target,brand_voice,monthly_credit_limit&user_id=eq.{user_id}"
+    with httpx.Client(timeout=10.0) as c:
+        r = c.get(url, headers=_admin_headers())
+        r.raise_for_status()
+        rows = r.json()
+    return rows[0] if rows else {"brand_voice": {}, "monthly_credit_limit": 50}

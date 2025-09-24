@@ -1,4 +1,4 @@
-# ... deine Imports
+# app/main.py
 from fastapi import FastAPI, HTTPException, Header, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
@@ -6,13 +6,17 @@ from pydantic import BaseModel, field_validator
 from .config import settings
 from .gen import generate
 from .supa import (
-    get_user_from_token, get_profile,
-    count_generates_this_month, log_usage, month_start_utc
+    get_user_from_token,
+    get_profile,
+    get_profile_full,        # <-- für Brand-Voice
+    count_generates_this_month,
+    log_usage,
+    month_start_utc,
 )
 
-app = FastAPI(title="Creator AI Backend", version="0.3.3")
+app = FastAPI(title="Creator AI Backend", version="0.3.4")
 
-# TEMP: breite CORS (du hattest sie schon offen; lassen wir so bis es läuft)
+# Breite CORS fürs MVP; später enger stellen (ENV: CORS_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,16 +39,16 @@ class GenerateIn(BaseModel):
     @field_validator("type")
     @classmethod
     def valid_type(cls, v):
-        allowed = {"hook","script","caption","hashtags"}
+        allowed = {"hook", "script", "caption", "hashtags"}
         if v not in allowed:
             raise ValueError(f"type must be one of {allowed}")
         return v
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.3"}
+    return {"ok": True, "version": "0.3.4"}
 
-# ---- Credits unverändert (deine aktuelle, mit Fallback 50) ----
+# ---- Credits (mit Fallback 50) ----
 @app.get("/api/v1/credits")
 def get_credits(authorization: str | None = Header(default=None)):
     token = None
@@ -56,7 +60,7 @@ def get_credits(authorization: str | None = Header(default=None)):
         return {
             "limit": 0, "used": 0, "remaining": 0,
             "period": {"from": month_start_utc(), "to": None},
-            "authenticated": False
+            "authenticated": False,
         }
 
     user_id = user.get("id")
@@ -82,10 +86,10 @@ def get_credits(authorization: str | None = Header(default=None)):
         "remaining": remaining,
         "period": {"from": month_start_utc(), "to": None},
         "authenticated": True,
-        "user": {"id": user_id, "email": user.get("email")}
+        "user": {"id": user_id, "email": user.get("email")},
     }
 
-# ---- POST (wie gehabt) ----
+# ---- POST Generate (mit Brand-Voice & Credits) ----
 @app.post("/api/v1/generate")
 def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None)):
     token = None
@@ -95,9 +99,10 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
     user = get_user_from_token(token) if token else None
     user_id = user.get("id") if user else None
 
+    # Credit-Check (nur wenn eingeloggt)
     if user_id:
         prof = get_profile(user_id)
-        limit = int(prof.get("monthly_credit_limit", 50) or 50)
+        limit = int((prof.get("monthly_credit_limit") or 50))
         used = count_generates_this_month(user_id)
         if used >= limit:
             raise HTTPException(status_code=429, detail="Monatslimit erreicht.")
@@ -106,12 +111,28 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
         except Exception:
             pass
 
+    # >>> Brand-Voice anwenden (wie besprochen) <<<
     try:
-        return generate(payload.type, payload.topic.strip(), payload.niche.strip(), payload.tone.strip())
+        voice = None
+        if user_id:
+            full = get_profile_full(user_id)
+            voice = full.get("brand_voice") or {}
+            # Brand-Voice-Ton kann UI-Ton überschreiben, falls gesetzt
+            if isinstance(voice, dict) and voice.get("tone"):
+                payload.tone = voice["tone"]
+
+        result = generate(
+            payload.type,
+            payload.topic.strip(),
+            payload.niche.strip(),
+            payload.tone.strip(),
+            voice,  # <- neues Argument
+        )
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---- NEU: GET-Fallback ohne Body/Token (debug; zieht KEINE Credits) ----
+# ---- GET-Fallback ohne Body/Token (debug; zieht KEINE Credits) ----
 @app.get("/api/v1/generate_simple")
 def api_generate_simple(
     type: str = Query(..., pattern="^(hook|script|caption|hashtags)$"),
