@@ -1,8 +1,22 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 from .gen import generate
+import os
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Creator AI Backend", version="0.1.0")
+
+# CORS (lokal + Vercel)
+origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,https://*.vercel.app").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in origins],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class GenerateIn(BaseModel):
     type: str
