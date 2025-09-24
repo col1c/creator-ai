@@ -14,17 +14,23 @@ def _admin_headers():
     }
 
 def get_user_from_token(access_token: str) -> dict | None:
-    # Prüft Supabase-Access-Token → liefert User (id,email)
-    if not access_token: return None
+    if not access_token:
+        return None
     url = f"{SUPABASE_URL}/auth/v1/user"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        # wichtig: apikey mitschicken (anon ODER service_role)
+        "apikey": os.getenv("SUPABASE_ANON_KEY") or SERVICE_ROLE or "",
+    }
     try:
         with httpx.Client(timeout=10.0) as c:
-            r = c.get(url, headers={"Authorization": f"Bearer {access_token}"})
+            r = c.get(url, headers=headers)
             if r.status_code == 200:
                 return r.json()
     except Exception:
         pass
     return None
+
 
 def get_profile(user_id: str) -> dict:
     # users_public lesen (monthly_credit_limit)
