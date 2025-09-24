@@ -4,7 +4,7 @@ from .config import settings
 
 SUPABASE_URL = settings.SUPABASE_URL
 SERVICE_ROLE = settings.SUPABASE_SERVICE_ROLE
-ANON = settings.SUPABASE_ANON_KEY
+
 
 def _admin_headers():
     if not SUPABASE_URL or not SERVICE_ROLE:
@@ -22,7 +22,6 @@ def get_user_from_token(access_token: str) -> dict | None:
     url = f"{SUPABASE_URL}/auth/v1/user"
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "apikey": ANON or SERVICE_ROLE or "",
     }
     try:
         with httpx.Client(timeout=12.0) as c:
