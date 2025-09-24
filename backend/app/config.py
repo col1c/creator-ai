@@ -1,12 +1,21 @@
-import os
 from pydantic import BaseModel
+import os
 
 class Settings(BaseModel):
-    ENV: str = os.getenv("ENV", "prod")
+    ENV: str = os.getenv("ENV", "local")
+
     SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_ROLE: str | None = os.getenv("SUPABASE_SERVICE_ROLE")
-    SUPABASE_ANON_KEY: str | None = os.getenv("SUPABASE_ANON_KEY")
-    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-    CORS_ORIGIN_REGEX: str = os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app$")
+
+    MAILGUN_API_KEY: str | None = os.getenv("MAILGUN_API_KEY")
+    MAILGUN_DOMAIN: str | None = os.getenv("MAILGUN_DOMAIN")
+
+    # OpenRouter / LLM
+    OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "x-ai/grok-4-fast:free")
+    OPENROUTER_SITE_URL: str | None = os.getenv("OPENROUTER_SITE_URL")
+    OPENROUTER_APP_TITLE: str = os.getenv("OPENROUTER_APP_TITLE", "Creator AI")
+    LLM_REASONING: str = os.getenv("LLM_REASONING", "off")  # "on"|"off"
+    LLM_JSON_MODE: str = os.getenv("LLM_JSON_MODE", "on")   # "on"|"off"
 
 settings = Settings()

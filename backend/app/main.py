@@ -1,22 +1,26 @@
 # app/main.py
+from datetime import datetime, timezone
+from typing import Literal
+
 from fastapi import FastAPI, HTTPException, Header, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from .llm_openrouter import call_openrouter
 from .config import settings
 from .gen import generate
 from .supa import (
     get_user_from_token,
     get_profile,
-    get_profile_full,        # <-- für Brand-Voice
+    get_profile_full,        # Brand-Voice
     count_generates_this_month,
     log_usage,
     month_start_utc,
 )
 
-app = FastAPI(title="Creator AI Backend", version="0.3.4")
+app = FastAPI(title="Creator AI Backend", version="0.3.5")
 
-# Breite CORS fürs MVP; später enger stellen (ENV: CORS_ORIGINS)
+# CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,22 +35,30 @@ def options_handler(rest_of_path: str):
     return Response(status_code=204)
 
 class GenerateIn(BaseModel):
-    type: str
+    # NEU: Engine-Switch (auto | llm | local)
+    type: Literal["hook", "script", "caption", "hashtags"]
     topic: str
     niche: str = "allgemein"
     tone: str = "locker"
+    engine: Literal["auto", "llm", "local"] = "auto"
 
-    @field_validator("type")
+    # Sanitize/Trim
+    @field_validator("topic")
     @classmethod
-    def valid_type(cls, v):
-        allowed = {"hook", "script", "caption", "hashtags"}
-        if v not in allowed:
-            raise ValueError(f"type must be one of {allowed}")
+    def topic_minlen(cls, v: str):
+        v = (v or "").strip()
+        if len(v) < 2:
+            raise ValueError("topic too short")
         return v
+
+    @field_validator("niche", "tone")
+    @classmethod
+    def trim_fields(cls, v: str):
+        return (v or "").strip()
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.4"}
+    return {"ok": True, "version": "0.3.5"}
 
 # ---- Credits (mit Fallback 50) ----
 @app.get("/api/v1/credits")
@@ -89,7 +101,7 @@ def get_credits(authorization: str | None = Header(default=None)):
         "user": {"id": user_id, "email": user.get("email")},
     }
 
-# ---- POST Generate (mit Brand-Voice & Credits) ----
+# ---- POST Generate (Brand-Voice + Credits + LLM-Switch) ----
 @app.post("/api/v1/generate")
 def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None)):
     token = None
@@ -99,7 +111,7 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
     user = get_user_from_token(token) if token else None
     user_id = user.get("id") if user else None
 
-    # Credit-Check (nur wenn eingeloggt)
+    # Credits nur für eingeloggte Nutzer
     if user_id:
         prof = get_profile(user_id)
         limit = int((prof.get("monthly_credit_limit") or 50))
@@ -111,23 +123,50 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
         except Exception:
             pass
 
-    # >>> Brand-Voice anwenden (wie besprochen) <<<
-    try:
-        voice = None
-        if user_id:
-            full = get_profile_full(user_id)
-            voice = full.get("brand_voice") or {}
-            # Brand-Voice-Ton kann UI-Ton überschreiben, falls gesetzt
-            if isinstance(voice, dict) and voice.get("tone"):
-                payload.tone = voice["tone"]
+    # Brand-Voice laden; Tone ggf. überschreiben
+    voice = None
+    if user_id:
+        full = get_profile_full(user_id)
+        voice = full.get("brand_voice") or {}
+        if isinstance(voice, dict) and voice.get("tone"):
+            payload.tone = voice["tone"]
 
-        result = generate(
-            payload.type,
-            payload.topic.strip(),
-            payload.niche.strip(),
-            payload.tone.strip(),
-            voice,  # <- neues Argument
-        )
+    # Engine-Auswahl
+    want_llm = False
+    if payload.engine == "llm":
+        want_llm = True
+        if not settings.OPENROUTER_API_KEY:
+            raise HTTPException(status_code=503, detail="LLM nicht konfiguriert (OPENROUTER_API_KEY fehlt).")
+    elif payload.engine == "auto":
+        want_llm = bool(settings.OPENROUTER_API_KEY)
+    else:  # "local"
+        want_llm = False
+
+    # Erst LLM versuchen (wenn gewünscht), dann Fallback auf local
+    if want_llm:
+        try:
+            variants = call_openrouter(
+                payload.type, payload.topic, payload.niche, payload.tone, voice
+            )
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "type": payload.type,
+                "engine": "llm",
+                "variants": variants,
+            }
+        except Exception as e:
+            # Optional: Fehler loggen
+            try:
+                if user_id:
+                    log_usage(user_id, "llm_error", {"msg": str(e)})
+            except Exception:
+                pass
+            # Fallback auf lokalen Generator
+
+    # Lokaler Generator (kostenlos)
+    try:
+        result = generate(payload.type, payload.topic, payload.niche, payload.tone, voice)
+        result["engine"] = "local"
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
