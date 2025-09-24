@@ -15,7 +15,6 @@ def gen_hooks(topic: str, niche: str, tone: str) -> list[str]:
         "Bevor du mit {topic} anfängst, sieh das"
     ]
     base = [p.format(topic=topic, niche=niche) for p in patterns]
-    # Ton leicht variieren
     if "locker" in tone.lower():
         base = [b.replace("…", " 😮").replace("!", "") for b in base]
     return base[:10]
@@ -61,7 +60,6 @@ def gen_hashtags(topic: str, niche: str) -> list[str]:
         "#creator", "#tips", "#howto", "#shorts", "#tiktok", "#reels",
         "#content", "#viral", "#strategy", "#daily", "#consistency"
     ]
-    # Ein wenig mischen und 12–16 zurückgeben
     return sample(base, k=min(len(base), 14))
 
 def generate(kind: str, topic: str, niche: str, tone: str):
