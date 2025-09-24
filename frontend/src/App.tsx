@@ -277,7 +277,8 @@ export default function App() {
     );
   }
 
-  const limitReached = credits.authenticated && credits.remaining <= 0;
+ const limitReached = credits.authenticated && credits.limit > 0 && credits.remaining <= 0;
+
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
@@ -285,7 +286,7 @@ export default function App() {
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
-            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email}
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">

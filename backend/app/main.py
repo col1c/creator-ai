@@ -10,7 +10,7 @@ from .supa import (
     count_generates_this_month, log_usage, month_start_utc
 )
 
-app = FastAPI(title="Creator AI Backend", version="0.3.0")
+app = FastAPI(title="Creator AI Backend", version="0.3.1")
 
 # --- CORS robust (konkrete Origins + Regex für vercel.app) ---
 origins_list = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
@@ -41,7 +41,7 @@ class GenerateIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "env": settings.ENV}
+    return {"ok": True, "env": settings.ENV, "version": "0.3.1"}
 
 @app.get("/api/v1/credits")
 def get_credits(authorization: str | None = Header(default=None)):
@@ -60,7 +60,6 @@ def get_credits(authorization: str | None = Header(default=None)):
     user_id = user.get("id")
     prof = get_profile(user_id)
 
-    # HARTE DEFAULTS/FALLBACKS
     try:
         limit_raw = prof.get("monthly_credit_limit", 50)
         limit = int(limit_raw or 50)
