@@ -7,11 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI(title="Creator AI Backend", version="0.1.0")
 
 # CORS (lokal + Vercel)
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,https://*.vercel.app").split(",")
+app = FastAPI(title="Creator AI Backend", version="0.1.0")
+
+allowed_origins = ["http://localhost:5173"]
+vercel = os.getenv("VERCEL_ORIGIN", "").strip()  # z.B. https://creator-ai-vert.vercel.app
+if vercel:
+    allowed_origins.append(vercel)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in origins],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
