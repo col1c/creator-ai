@@ -8,7 +8,7 @@ SERVICE_ROLE = settings.SUPABASE_SERVICE_ROLE
 
 def _admin_headers():
     if not SUPABASE_URL or not SERVICE_ROLE:
-        raise RuntimeError("Supabase Service Role/URL fehlt")
+        raise RuntimeError("Supabase Service Role nicht gesetzt")
     return {
         "apikey": SERVICE_ROLE,
         "Authorization": f"Bearer {SERVICE_ROLE}",
@@ -16,7 +16,10 @@ def _admin_headers():
     }
 
 def get_user_from_token(access_token: str) -> dict | None:
-    """Liest den Supabase-User zum Access-Token. Wichtig: apikey mitsenden."""
+    """
+    Liest den User aus Supabase Auth. Wichtig: 'apikey' MUSS gesetzt sein
+    (anon ODER service role), sonst kommt 401/403 -> user=None.
+    """
     if not access_token or not SUPABASE_URL:
         return None
     url = f"{SUPABASE_URL}/auth/v1/user"
@@ -24,10 +27,12 @@ def get_user_from_token(access_token: str) -> dict | None:
         "Authorization": f"Bearer {access_token}",
     }
     try:
-        with httpx.Client(timeout=12.0) as c:
+        with httpx.Client(timeout=10.0) as c:
             r = c.get(url, headers=headers)
             if r.status_code == 200:
                 return r.json()
+            # Optionales Debug-Logging (kurz halten)
+            # print("auth user fail", r.status_code, r.text[:200])
     except Exception:
         pass
     return None
