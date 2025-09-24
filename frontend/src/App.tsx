@@ -35,6 +35,9 @@ export default function App() {
   // NEW: Settings Toggle
   const [showSettings, setShowSettings] = useState(false);
 
+  // NEW: Engine-Anzeige
+  const [engine, setEngine] = useState<string>("—");
+
   // ---- Helper: Headers immer als Record<string,string> bauen ----
   const buildHeaders = useCallback(
     (includeJson = false): HeadersInit => {
@@ -168,6 +171,10 @@ export default function App() {
         body: JSON.stringify({ type, topic, niche, tone }),
       });
 
+      // NEW: Engine-Header lesen (sofort nach fetch)
+      const engHeader = res.headers.get("X-Engine");
+      if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : "Local");
+
       if (res.status === 429) {
         const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
         throw new Error(j?.detail || "Monatslimit erreicht");
@@ -184,6 +191,11 @@ export default function App() {
       }
 
       const data = await res.json();
+      // Falls kein Header gesetzt war, versuche JSON-Feld
+      if (!engHeader && data?.engine) {
+        setEngine(data.engine === "llm" ? "LLM (Grok 4 Fast)" : "Local");
+      }
+
       setVariants((data?.variants ?? []) as string[]);
       fetchCredits().catch(() => {});
       return;
@@ -198,7 +210,8 @@ export default function App() {
 
         const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
         setVariants((data?.variants ?? []) as string[]);
-        // Hinweis, dass Fallback aktiv war
+        // NEW: Fallback-Engine markieren
+        setEngine("Local (Fallback)");
         setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
         return;
       } catch (e2: any) {
@@ -248,6 +261,7 @@ export default function App() {
     await supabase.auth.signOut();
     setLibrary([]);
     setCredits({ limit: 0, used: 0, remaining: 0, authenticated: false });
+    setEngine("—");
   }, []);
 
   const Tab = ({ k, label }: { k: GenType; label: string }) => (
@@ -266,6 +280,11 @@ export default function App() {
     <span className="px-2 py-1 rounded-lg border text-xs">
       Credits: {credits.used}/{credits.limit} • Rest: {credits.remaining}
     </span>
+  );
+
+  // NEW: Engine-Badge
+  const EngineBadge = () => (
+    <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>
   );
 
   // ---- UI ----
@@ -315,7 +334,9 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* NEW: Settings-Button im Header */}
+          {/* NEW: Engine-Badge im Header */}
+          <EngineBadge />
+          {/* Settings-Button */}
           <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showSettings ? "Close Settings" : "Settings"}
           </button>

@@ -5,6 +5,8 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Header, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+from .llm_openrouter import call_openrouter  # falls noch nicht importiert
+from .config import settings
 
 from .llm_openrouter import call_openrouter
 from .config import settings
@@ -27,7 +29,9 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Engine"],  # <— NEU
 )
+
 
 # ---- universal OPTIONS handler (Preflight) ----
 @app.options("/{rest_of_path:path}")
@@ -103,7 +107,7 @@ def get_credits(authorization: str | None = Header(default=None)):
 
 # ---- POST Generate (Brand-Voice + Credits + LLM-Switch) ----
 @app.post("/api/v1/generate")
-def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None)):
+def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None), response: Response = None):
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
@@ -111,7 +115,7 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
     user = get_user_from_token(token) if token else None
     user_id = user.get("id") if user else None
 
-    # Credits nur für eingeloggte Nutzer
+    # Credit-Check (nur wenn eingeloggt)
     if user_id:
         prof = get_profile(user_id)
         limit = int((prof.get("monthly_credit_limit") or 50))
@@ -123,7 +127,7 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
         except Exception:
             pass
 
-    # Brand-Voice laden; Tone ggf. überschreiben
+    # Brand-Voice
     voice = None
     if user_id:
         full = get_profile_full(user_id)
@@ -131,45 +135,32 @@ def api_generate(payload: GenerateIn, authorization: str | None = Header(default
         if isinstance(voice, dict) and voice.get("tone"):
             payload.tone = voice["tone"]
 
-    # Engine-Auswahl
-    want_llm = False
-    if payload.engine == "llm":
-        want_llm = True
-        if not settings.OPENROUTER_API_KEY:
-            raise HTTPException(status_code=503, detail="LLM nicht konfiguriert (OPENROUTER_API_KEY fehlt).")
-    elif payload.engine == "auto":
-        want_llm = bool(settings.OPENROUTER_API_KEY)
-    else:  # "local"
-        want_llm = False
-
-    # Erst LLM versuchen (wenn gewünscht), dann Fallback auf local
-    if want_llm:
-        try:
-            variants = call_openrouter(
-                payload.type, payload.topic, payload.niche, payload.tone, voice
-            )
-            return {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "type": payload.type,
-                "engine": "llm",
-                "variants": variants,
-            }
-        except Exception as e:
-            # Optional: Fehler loggen
-            try:
-                if user_id:
-                    log_usage(user_id, "llm_error", {"msg": str(e)})
-            except Exception:
-                pass
-            # Fallback auf lokalen Generator
-
-    # Lokaler Generator (kostenlos)
+    # LLM zuerst probieren
     try:
-        result = generate(payload.type, payload.topic, payload.niche, payload.tone, voice)
+        if settings.OPENROUTER_API_KEY:
+            variants = call_openrouter(payload.type, payload.topic.strip(), payload.niche.strip(), payload.tone.strip(), voice)
+            if response is not None:
+                response.headers["X-Engine"] = "llm"
+            return {
+                "generated_at": month_start_utc(),
+                "type": payload.type,
+                "variants": variants,
+                "engine": "llm"
+            }
+    except Exception:
+        # LLM-Fehler → fällt automatisch auf local
+        pass
+
+    # Lokaler Fallback
+    try:
+        result = generate(payload.type, payload.topic.strip(), payload.niche.strip(), payload.tone.strip(), voice)
+        if response is not None:
+            response.headers["X-Engine"] = "local"
         result["engine"] = "local"
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 # ---- GET-Fallback ohne Body/Token (debug; zieht KEINE Credits) ----
 @app.get("/api/v1/generate_simple")
@@ -178,8 +169,13 @@ def api_generate_simple(
     topic: str = Query(..., min_length=2),
     niche: str = Query("allgemein"),
     tone: str = Query("locker"),
+    response: Response = None,
 ):
     try:
-        return generate(type, topic.strip(), niche.strip(), tone.strip())
+        result = generate(type, topic.strip(), niche.strip(), tone.strip())
+        if response is not None:
+            response.headers["X-Engine"] = "local"
+        result["engine"] = "local"
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
