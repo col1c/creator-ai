@@ -4,16 +4,18 @@ import Auth from "./Auth";
 
 const API_BASE = import.meta.env.VITE_API_BASE as string;
 type GenType = "hook" | "script" | "caption" | "hashtags";
-
 type Session = Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"];
 type GenRow = { id: number; type: string; input: any; output: string; created_at: string };
 
 export default function App() {
   const [session, setSession] = useState<Session>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+
   const [type, setType] = useState<GenType>("hook");
   const [topic, setTopic] = useState("Muskelaufbau");
   const [niche, setNiche] = useState("fitness");
   const [tone, setTone] = useState("locker");
+
   const [loading, setLoading] = useState(false);
   const [variants, setVariants] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -21,10 +23,18 @@ export default function App() {
   const [library, setLibrary] = useState<GenRow[]>([]);
   const [busySaveId, setBusySaveId] = useState<number | null>(null);
 
+  const [credits, setCredits] = useState<{limit:number; used:number; remaining:number; authenticated:boolean}>({limit:0, used:0, remaining:0, authenticated:false});
+
   // Session-Listener
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAccessToken(data.session?.access_token || null);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession(s);
+      setAccessToken(s?.access_token || null);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -32,6 +42,22 @@ export default function App() {
   useEffect(() => {
     fetch(`${API_BASE}/health`).then(()=>setWarm(true)).catch(()=>setWarm(false));
   }, []);
+
+  const fetchCredits = async () => {
+    if (!accessToken) { setCredits({limit:0, used:0, remaining:0, authenticated:false}); return; }
+    const res = await fetch(`${API_BASE}/api/v1/credits`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data = await res.json();
+    setCredits({
+      limit: data?.limit ?? 0,
+      used: data?.used ?? 0,
+      remaining: data?.remaining ?? 0,
+      authenticated: !!data?.authenticated
+    });
+  };
+
+  useEffect(() => { fetchCredits(); }, [accessToken]);
 
   const canGenerate = useMemo(
     () => topic.trim().length > 1 && niche.trim().length > 0 && tone.trim().length > 0,
@@ -44,16 +70,21 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/api/v1/generate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
+        },
         body: JSON.stringify({ type, topic, niche, tone }),
       });
+      if (res.status === 429) {
+        const j = await res.json().catch(()=>({detail:"Limit erreicht"}));
+        throw new Error(j?.detail || "Monatslimit erreicht");
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setVariants((data?.variants ?? []) as string[]);
-      if (session) {
-        // Usage-Log (optional)
-        await supabase.from("usage_log").insert({ event: "generate" });
-      }
+      // Nach erfolgreicher Generierung Credits neu laden
+      fetchCredits().catch(()=>{});
     } catch (e: any) {
       setError(e?.message || "Fehler bei der Generierung");
     } finally {
@@ -63,7 +94,7 @@ export default function App() {
 
   const saveToLibrary = async (variant: string) => {
     if (!session) { alert("Bitte zuerst einloggen, um zu speichern."); return; }
-    setBusySaveId(1); // nur UI spinner
+    setBusySaveId(1);
     try {
       const { error } = await supabase.from("generations").insert({
         type,
@@ -73,7 +104,6 @@ export default function App() {
       if (error) throw error;
       await loadLibrary();
       alert("Gespeichert ✅");
-      // Usage-Log
       await supabase.from("usage_log").insert({ event: "save", meta: { type } });
     } catch (e: any) {
       alert(e.message || "Speichern fehlgeschlagen");
@@ -94,7 +124,7 @@ export default function App() {
 
   useEffect(() => { loadLibrary(); }, [session]);
 
-  const logout = async () => { await supabase.auth.signOut(); setLibrary([]); };
+  const logout = async () => { await supabase.auth.signOut(); setLibrary([]); setCredits({limit:0,used:0,remaining:0,authenticated:false}); };
 
   const Tab = ({ k, label }: { k: GenType; label: string }) => (
     <button
@@ -106,6 +136,12 @@ export default function App() {
     >
       {label}
     </button>
+  );
+
+  const CreditBadge = () => (
+    <span className="px-2 py-1 rounded-lg border text-xs">
+      Credits: {credits.used}/{credits.limit} • Rest: {credits.remaining}
+    </span>
   );
 
   // Login-Gate
@@ -121,7 +157,7 @@ export default function App() {
         <main className="max-w-4xl mx-auto px-4 pb-24">
           <Auth />
           <div className="mt-6 p-4 rounded-xl border text-sm opacity-80">
-            Tipp: Registriere dich (E-Mail/Passwort) und logge dich ein. Danach kannst du Entwürfe speichern.
+            Tipp: Registriere dich (E-Mail/Passwort) und logge dich ein. Danach kannst du Entwürfe speichern & Credits nutzen.
           </div>
         </main>
       </div>
@@ -129,16 +165,21 @@ export default function App() {
   }
 
   // App-UI
+  const limitReached = credits.authenticated && credits.remaining <= 0;
+
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
-      <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between">
+      <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email}
           </p>
         </div>
-        <button onClick={logout} className="px-3 py-1 rounded-lg border text-sm">Logout</button>
+        <div className="flex items-center gap-2">
+          <CreditBadge />
+          <button onClick={logout} className="px-3 py-1 rounded-lg border text-sm">Logout</button>
+        </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
@@ -175,15 +216,16 @@ export default function App() {
         </div>
 
         <button
-          disabled={!canGenerate || loading}
+          disabled={!canGenerate || loading || limitReached}
           onClick={generate}
           className={
             "px-4 py-2 rounded-xl border font-medium " +
-            (loading || !canGenerate ? "opacity-50 cursor-not-allowed"
+            ((loading || !canGenerate || limitReached)
+              ? "opacity-50 cursor-not-allowed"
               : "bg-black text-white dark:bg-white dark:text-black")
           }
         >
-          {loading ? "Generiere…" : "Generieren"}
+          {limitReached ? "Limit erreicht" : (loading ? "Generiere…" : "Generieren")}
         </button>
 
         {error && (
