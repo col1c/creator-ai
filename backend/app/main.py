@@ -51,7 +51,6 @@ def get_credits(authorization: str | None = Header(default=None)):
 
     user = get_user_from_token(token) if token else None
     if not user:
-        # kein Login → kein persönliches Kontingent
         return {
             "limit": 0, "used": 0, "remaining": 0,
             "period": {"from": month_start_utc(), "to": None},
@@ -60,16 +59,31 @@ def get_credits(authorization: str | None = Header(default=None)):
 
     user_id = user.get("id")
     prof = get_profile(user_id)
-    limit = int(prof.get("monthly_credit_limit", 50))
-    used = count_generates_this_month(user_id)
+
+    # HARTE DEFAULTS/FALLBACKS
+    try:
+        limit_raw = prof.get("monthly_credit_limit", 50)
+        limit = int(limit_raw or 50)
+    except Exception:
+        limit = 50
+    if limit <= 0:
+        limit = 50
+
+    try:
+        used = count_generates_this_month(user_id)
+    except Exception:
+        used = 0
+
+    remaining = max(0, limit - used)
     return {
         "limit": limit,
         "used": used,
-        "remaining": max(0, limit - used),
+        "remaining": remaining,
         "period": {"from": month_start_utc(), "to": None},
         "authenticated": True,
         "user": {"id": user_id, "email": user.get("email")}
     }
+
 
 @app.post("/api/v1/generate")
 def api_generate(payload: GenerateIn, authorization: str | None = Header(default=None)):
