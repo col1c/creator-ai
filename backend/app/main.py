@@ -6,7 +6,20 @@ from .gen import generate
 from .supa import get_user_from_token, get_profile, count_generates_this_month, log_usage, month_start_utc
 
 
-app = FastAPI(title="Creator AI Backend", version="0.2.0")
+app = FastAPI(title="Creator AI Backend", version="0.2.1")
+
+# EXAKTE Origins + Regex für alle vercel.app-Subdomains
+origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+origin_regex = os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app$")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in origins_env.split(",") if o.strip()],
+    allow_origin_regex=origin_regex,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class GenerateIn(BaseModel):
     type: str
