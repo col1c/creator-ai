@@ -53,7 +53,7 @@ export default function App() {
   const fetchJSON = useCallback(
     async (url: string, init?: RequestInit) => {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 15000);
+      const t = setTimeout(() => ctrl.abort(), 30000); // 30s
       try {
         const res = await fetch(url, { cache: "no-store", ...init, signal: ctrl.signal });
         const txt = await res.text().catch(() => "");
