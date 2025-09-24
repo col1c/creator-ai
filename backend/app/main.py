@@ -10,7 +10,22 @@ from .supa import (
     count_generates_this_month, log_usage, month_start_utc
 )
 
-app = FastAPI(title="Creator AI Backend", version="0.3.1")
+app = FastAPI(title="Creator AI Backend", version="0.3.2")
+
+# ---- CORS HAMMER (TEMPORÄR) ----
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # alles erlauben
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/health")
+def health():
+    return {"ok": True, "version": "0.3.2"}
+
+
 
 # --- CORS robust (konkrete Origins + Regex für vercel.app) ---
 origins_list = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
