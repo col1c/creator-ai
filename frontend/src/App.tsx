@@ -16,7 +16,7 @@ type GenRow = {
   input: any;
   output: string;
   created_at: string;
-  favorite: boolean; // <-- NEU
+  favorite: boolean;
 };
 type Credits = { limit: number; used: number; remaining: number; authenticated: boolean };
 
@@ -161,7 +161,7 @@ export default function App() {
     if (!session) return;
     const { data, error } = await supabase
       .from("generations")
-      .select("id,type,input,output,created_at,favorite") // <-- favorite dazu
+      .select("id,type,input,output,created_at,favorite")
       .order("created_at", { ascending: false })
       .limit(50);
     if (!error && data) setLibrary(data as any);
@@ -257,7 +257,9 @@ export default function App() {
       }
       setBusySaveId(1);
       try {
+        const uid = session.user.id; // <-- WICHTIG für RLS
         const { error } = await supabase.from("generations").insert({
+          user_id: uid,               // <-- NEU: RLS-konform
           type,
           input: { topic, niche, tone },
           output: variant,
@@ -275,7 +277,7 @@ export default function App() {
     [session, type, topic, niche, tone, loadLibrary]
   );
 
-  // <-- NEU: Favoriten-Toggle
+  // Favoriten-Toggle
   const toggleFavorite = useCallback(async (row: GenRow) => {
     try {
       const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
@@ -479,11 +481,13 @@ export default function App() {
                       if (!session) return alert("Bitte einloggen.");
                       setBusySaveId(1);
                       try {
+                        const uid = session.user.id; // <-- WICHTIG für RLS
                         const { error } = await supabase.from("generations").insert({
+                          user_id: uid,       // <-- NEU: RLS-konform
                           type,
                           input: { topic, niche, tone },
                           output: v,
-                          favorite: true, // <-- direkt als Favorit
+                          favorite: true,
                         });
                         if (error) throw error;
                         await loadLibrary();
