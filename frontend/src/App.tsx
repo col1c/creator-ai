@@ -10,7 +10,14 @@ const api = (path: string) => `${API_BASE}${path}`;
 
 type GenType = "hook" | "script" | "caption" | "hashtags";
 type Session = Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"];
-type GenRow = { id: number; type: string; input: any; output: string; created_at: string };
+type GenRow = {
+  id: number;
+  type: string;
+  input: any;
+  output: string;
+  created_at: string;
+  favorite: boolean; // <-- NEU
+};
 type Credits = { limit: number; used: number; remaining: number; authenticated: boolean };
 
 export default function App() {
@@ -94,16 +101,13 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // E-Mail des Users in users_public upserten (separater Effect, NICHT in Callbacks/hooks verschachteln)
+  // E-Mail des Users in users_public upserten
   useEffect(() => {
     const upsertEmail = async () => {
       if (!session?.user) return;
       await supabase
         .from("users_public")
-        .upsert(
-          { user_id: session.user.id, email: session.user.email },
-          { onConflict: "user_id" }
-        );
+        .upsert({ user_id: session.user.id, email: session.user.email }, { onConflict: "user_id" });
     };
     upsertEmail().catch(() => {});
   }, [session]);
@@ -157,7 +161,7 @@ export default function App() {
     if (!session) return;
     const { data, error } = await supabase
       .from("generations")
-      .select("id,type,input,output,created_at")
+      .select("id,type,input,output,created_at,favorite") // <-- favorite dazu
       .order("created_at", { ascending: false })
       .limit(50);
     if (!error && data) setLibrary(data as any);
@@ -271,6 +275,17 @@ export default function App() {
     [session, type, topic, niche, tone, loadLibrary]
   );
 
+  // <-- NEU: Favoriten-Toggle
+  const toggleFavorite = useCallback(async (row: GenRow) => {
+    try {
+      const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
+      if (error) throw error;
+      setLibrary((prev) => prev.map((r) => (r.id === row.id ? { ...r, favorite: !r.favorite } : r)));
+    } catch (e: any) {
+      alert(e?.message || "Favorit konnte nicht geändert werden.");
+    }
+  }, []);
+
   const logout = useCallback(async () => {
     await supabase.auth.signOut();
     setLibrary([]);
@@ -296,9 +311,7 @@ export default function App() {
     </span>
   );
 
-  const EngineBadge = () => (
-    <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>
-  );
+  const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
 
   // ---- UI ----
   if (!session) {
@@ -338,7 +351,8 @@ export default function App() {
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
-            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API:{" "}
+            {API_BASE || "—"}
           </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
@@ -459,6 +473,34 @@ export default function App() {
                   >
                     {busySaveId !== null ? "Speichere…" : "Speichern"}
                   </button>
+                  {/* Optional: direkt als Favorit speichern */}
+                  <button
+                    onClick={async () => {
+                      if (!session) return alert("Bitte einloggen.");
+                      setBusySaveId(1);
+                      try {
+                        const { error } = await supabase.from("generations").insert({
+                          type,
+                          input: { topic, niche, tone },
+                          output: v,
+                          favorite: true, // <-- direkt als Favorit
+                        });
+                        if (error) throw error;
+                        await loadLibrary();
+                        alert("Als Favorit gespeichert ✅");
+                        await supabase.from("usage_log").insert({ event: "save", meta: { type, favorite: true } });
+                      } catch (e: any) {
+                        alert(e?.message || "Speichern fehlgeschlagen");
+                      } finally {
+                        setBusySaveId(null);
+                      }
+                    }}
+                    disabled={busySaveId !== null}
+                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
+                    title="Speichern & als Favorit markieren"
+                  >
+                    {busySaveId !== null ? "Speichere…" : "Speichern ★"}
+                  </button>
                 </div>
               </div>
             </div>
@@ -478,9 +520,23 @@ export default function App() {
         <div className="grid gap-3">
           {library.map((row) => (
             <div key={row.id} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
-              <div className="text-xs opacity-70 mb-1">
-                {row.type.toUpperCase()} • {new Date(row.created_at).toLocaleString()}
+              {/* Header mit Star-Toggle */}
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-xs opacity-70">
+                  {row.type.toUpperCase()} • {new Date(row.created_at).toLocaleString()}
+                </div>
+                <button
+                  onClick={() => toggleFavorite(row)}
+                  title={row.favorite ? "Als Nicht-Favorit markieren" : "Als Favorit markieren"}
+                  className={
+                    "px-2 py-1 rounded-lg border text-xs " +
+                    (row.favorite ? "bg-yellow-200 dark:bg-yellow-600" : "")
+                  }
+                >
+                  {row.favorite ? "★ Favorit" : "☆ Favorit"}
+                </button>
               </div>
+
               <div className="text-xs opacity-70 mb-2">
                 {row.input?.topic} • {row.input?.niche} • {row.input?.tone}
               </div>
