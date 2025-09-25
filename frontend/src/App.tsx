@@ -22,7 +22,7 @@ type GenRow = {
 };
 type Credits = { limit: number; used: number; remaining: number; authenticated: boolean };
 
-/** Debounce-Hook für Suche */
+/** Debounce-Hook */
 function useDebounced<T>(value: T, delay = 300) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -32,21 +32,90 @@ function useDebounced<T>(value: T, delay = 300) {
   return debounced;
 }
 
-/** Hilfsfunktion: egal was vom Backend kommt → Array<string> */
+/** Hilfen zum sauberen Aufteilen */
+function splitListString(s: string): string[] {
+  const txt = (s || "").replace(/\r\n/g, "\n").trim();
+  if (!txt) return [];
+
+  // Bullets → Zeilen
+  let work = txt
+    .replace(/[•●▪︎·]/g, "\n")
+    .replace(/\n[ \t]*[-–—]\s*/g, "\n");
+
+  // Falls ohnehin Zeilen
+  if (work.includes("\n")) {
+    return work.split(/\n+/).map(x => x.replace(/^[\-\–—•●]\s*/, "").trim()).filter(Boolean);
+  }
+
+  // Sätze (Punkt/!/? + Großbuchstabe/Zahl)
+  let parts = work.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/);
+  if (parts.length > 1) {
+    return parts.map(p => p.trim()).filter(Boolean);
+  }
+
+  // Dein Fall: Kommas vor Großbuchstaben/Zahlen (Listen in einer Zeile)
+  const commaParts = work.split(/,\s+(?=[A-ZÄÖÜ0-9])/);
+  if (commaParts.length >= 2) {
+    return commaParts.map(p => p.trim()).filter(Boolean);
+  }
+
+  // Fallback: nur ein Eintrag
+  return [txt];
+}
+
+/** Egal was vom Backend kommt → Array<string> */
 function normalizeVariants(v: unknown): string[] {
   try {
-    if (Array.isArray(v)) return v.map((x) => String(x ?? "").trim()).filter(Boolean);
-    if (typeof v === "string") return [v].filter(Boolean);
-    if (v && typeof v === "object" && "text" in (v as any) && typeof (v as any).text === "string") {
-      return [(v as any).text];
+    // 1) Array
+    if (Array.isArray(v)) {
+      const flat = v.flat();
+      const list: string[] = [];
+      for (const item of flat) {
+        if (typeof item === "string") list.push(item);
+        else if (item && typeof item === "object") {
+          const anyItem = item as any;
+          const cand =
+            (typeof anyItem.text === "string" && anyItem.text) ||
+            (typeof anyItem.content === "string" && anyItem.content) ||
+            (typeof anyItem.output === "string" && anyItem.output) ||
+            "";
+          list.push(cand || JSON.stringify(item));
+        } else if (item != null) {
+          list.push(String(item));
+        }
+      }
+      // Einzelner Eintrag könnte eine Liste enthalten
+      if (list.length === 1) {
+        const sub = splitListString(list[0]);
+        if (sub.length > 1) return sub;
+      }
+      return list.map(s => s.trim()).filter(Boolean);
     }
+
+    // 2) String
+    if (typeof v === "string") {
+      const arr = splitListString(v);
+      return arr.length ? arr : [v.trim()];
+    }
+
+    // 3) Objekt mit Textfeldern
+    if (v && typeof v === "object") {
+      const anyV = v as any;
+      const s =
+        (typeof anyV.text === "string" && anyV.text) ||
+        (typeof anyV.content === "string" && anyV.content) ||
+        (typeof anyV.output === "string" && anyV.output) ||
+        "";
+      return splitListString(String(s));
+    }
+
     return [];
   } catch {
     return [];
   }
 }
 
-/** Onboarding komplett manuell (nie auto) */
+/** Onboarding nie auto */
 const DISABLE_ONBOARDING =
   (typeof window !== "undefined" &&
     (new URLSearchParams(window.location.search).get("noob") === "1" ||
@@ -73,25 +142,20 @@ export default function App() {
 
   const [credits, setCredits] = useState<Credits>({ limit: 0, used: 0, remaining: 0, authenticated: false });
 
-  // Toggles
   const [showSettings, setShowSettings] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
 
-  // Engine- & Tokens-Anzeige
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
 
-  // Onboarding (nur per Button)
   const [showOnboarding, setShowOnboarding] = useState(false);
 
-  // Library-Filter & Suche
   const [libSearch, setLibSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "hook" | "script" | "caption" | "hashtags">("all");
   const [favOnly, setFavOnly] = useState(false);
   const [libLoading, setLibLoading] = useState(false);
   const debouncedSearch = useDebounced(libSearch, 300);
 
-  // ---- Helper: Headers bauen ----
   const buildHeaders = useCallback(
     (includeJson = false): HeadersInit => {
       const h: Record<string, string> = {};
@@ -102,11 +166,10 @@ export default function App() {
     [accessToken]
   );
 
-  // ---- Fetch-Helper ----
   const fetchJSON = useCallback(
     async (url: string, init?: RequestInit) => {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 30000); // 30s
+      const t = setTimeout(() => ctrl.abort(), 30000);
       try {
         const res = await fetch(url, { cache: "no-store", ...init, signal: ctrl.signal });
         const txt = await res.text().catch(() => "");
@@ -132,7 +195,7 @@ export default function App() {
     []
   );
 
-  // ---- Auth Lifecycle ----
+  // Auth
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
@@ -145,7 +208,7 @@ export default function App() {
     return () => sub?.subscription?.unsubscribe?.();
   }, []);
 
-  // users_public upserten (onboarding_done gleich TRUE, damit nie null)
+  // users_public upserten (onboarding_done direkt true)
   useEffect(() => {
     const upsertEmail = async () => {
       if (!session?.user) return;
@@ -179,7 +242,7 @@ export default function App() {
     warmup();
   }, [warmup]);
 
-  // Credits laden
+  // Credits
   const fetchCredits = useCallback(async () => {
     if (!accessToken) {
       setCredits({ limit: 0, used: 0, remaining: 0, authenticated: false });
@@ -203,7 +266,7 @@ export default function App() {
     fetchCredits();
   }, [fetchCredits]);
 
-  // Library laden (mit Filtern/Suche)
+  // Library
   const loadLibrary = useCallback(async () => {
     if (!session) return;
     setLibLoading(true);
@@ -238,7 +301,7 @@ export default function App() {
     loadLibrary();
   }, [typeFilter, favOnly, debouncedSearch, loadLibrary]);
 
-  // ---- Aktionen ----
+  // Generate
   const canGenerate = useMemo(
     () => topic.trim().length > 1 && niche.trim().length > 0 && tone.trim().length > 0,
     [topic, niche, tone]
@@ -252,11 +315,10 @@ export default function App() {
     setVariants([]);
 
     try {
-      // 1) POST (mit Token, Credits)
       const res = await fetch(api("/api/v1/generate"), {
         method: "POST",
         headers: buildHeaders(true),
-        body: JSON.stringify({ type, topic, niche, tone /* , engine: "local"  // <- zum Testen nur Local */ }),
+        body: JSON.stringify({ type, topic, niche, tone }),
       });
 
       const engHeader = res.headers.get("X-Engine");
@@ -291,7 +353,7 @@ export default function App() {
       fetchCredits().catch(() => {});
       return;
     } catch (e: any) {
-      // 2) GET Fallback (keine Credits)
+      // GET Fallback
       try {
         const params = new URLSearchParams({ type, topic, niche, tone });
         const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
@@ -319,6 +381,7 @@ export default function App() {
     }
   }, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON]);
 
+  // Save
   const saveToLibrary = useCallback(
     async (variant: string) => {
       if (!session) {
@@ -327,12 +390,12 @@ export default function App() {
       }
       setBusySaveId(1);
       try {
-        const uid = session.user.id; // RLS
+        const uid = session.user.id;
         const { error } = await supabase.from("generations").insert({
           user_id: uid,
           type,
           input: { topic, niche, tone },
-          output: variant,
+          output: variant.trim(),
         });
         if (error) throw error;
         await loadLibrary();
@@ -347,10 +410,11 @@ export default function App() {
     [session, type, topic, niche, tone, loadLibrary]
   );
 
+  // Fav
   const toggleFavorite = useCallback(async (row: GenRow) => {
     try {
       const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
-      if (error) throw error;
+    if (error) throw error;
       setLibrary((prev) => prev.map((r) => (r.id === row.id ? { ...r, favorite: !r.favorite } : r)));
     } catch (e: any) {
       alert(e?.message || "Favorit konnte nicht geändert werden.");
@@ -384,10 +448,7 @@ export default function App() {
   );
 
   const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
-
-  const TokensBadge = () => (
-    <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>
-  );
+  const TokensBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>;
 
   // ---- UI ----
   if (!session) {
@@ -429,9 +490,6 @@ export default function App() {
 
   const limitReached = credits.authenticated && credits.limit > 0 && credits.remaining <= 0;
 
-  // SAFE: nie wieder .map() auf Nicht-Array
-  const safeVariants = Array.isArray(variants) ? variants : [];
-
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
@@ -467,23 +525,12 @@ export default function App() {
         </div>
       </header>
 
-      {/* Onboarding-Modal – nur manuell */}
       {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
-        {showSettings && (
-          <div className="mb-6">
-            <Settings />
-          </div>
-        )}
+        {showSettings && <div className="mb-6"><Settings /></div>}
+        {showPlanner && <div className="mb-6"><Planner /></div>}
 
-        {showPlanner && (
-          <div className="mb-6">
-            <Planner />
-          </div>
-        )}
-
-        {/* Tabs */}
         <div className="flex gap-2 mb-4">
           <Tab k="hook" label="Hooks" />
           <Tab k="script" label="Skripte" />
@@ -491,33 +538,21 @@ export default function App() {
           <Tab k="hashtags" label="Hashtags" />
         </div>
 
-        {/* Form */}
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Thema</label>
-            <input
-              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={topic}
-              onChange={(e) => setTopic(e.target.value)}
-              placeholder="z. B. Muskelaufbau"
-            />
+            <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="z. B. Muskelaufbau" />
           </div>
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Nische</label>
-            <input
-              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={niche}
-              onChange={(e) => setNiche(e.target.value)}
-              placeholder="z. B. fitness, beauty, coding"
-            />
+            <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={niche} onChange={(e) => setNiche(e.target.value)} placeholder="z. B. fitness, beauty, coding" />
           </div>
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Ton</label>
-            <select
-              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={tone}
-              onChange={(e) => setTone(e.target.value)}
-            >
+            <select className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={tone} onChange={(e) => setTone(e.target.value)}>
               <option value="locker">locker</option>
               <option value="seriös">seriös</option>
               <option value="motiviert">motiviert</option>
@@ -531,8 +566,7 @@ export default function App() {
           onClick={generate}
           className={
             "px-4 py-2 rounded-xl border font-medium " +
-            (loading || !canGenerate || limitReached
-              ? "opacity-50 cursor-not-allowed"
+            (loading || !canGenerate || limitReached ? "opacity-50 cursor-not-allowed"
               : "bg-black text-white dark:bg-white dark:text-black")
           }
         >
@@ -548,22 +582,15 @@ export default function App() {
 
         {/* Ergebnisse */}
         <div className="mt-6 grid gap-3">
-          {safeVariants.map((v, i) => (
+          {variants.map((v, i) => (
             <div key={i} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
               <div className="flex items-start justify-between gap-3">
                 <pre className="whitespace-pre-wrap font-sans text-sm">{v}</pre>
                 <div className="flex gap-2">
-                  <button
-                    onClick={() => navigator.clipboard.writeText(v)}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
-                  >
-                    Kopieren
-                  </button>
-                  <button
-                    onClick={() => saveToLibrary(v)}
-                    disabled={busySaveId !== null}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
-                  >
+                  <button onClick={() => navigator.clipboard.writeText(v)}
+                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80">Kopieren</button>
+                  <button onClick={() => saveToLibrary(v)} disabled={busySaveId !== null}
+                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80">
                     {busySaveId !== null ? "Speichere…" : "Speichern"}
                   </button>
                   <button
@@ -573,11 +600,7 @@ export default function App() {
                       try {
                         const uid = session.user.id;
                         const { error } = await supabase.from("generations").insert({
-                          user_id: uid,
-                          type,
-                          input: { topic, niche, tone },
-                          output: v,
-                          favorite: true,
+                          user_id: uid, type, input: { topic, niche, tone }, output: v, favorite: true,
                         });
                         if (error) throw error;
                         await loadLibrary();
@@ -599,32 +622,26 @@ export default function App() {
               </div>
             </div>
           ))}
-          {!loading && safeVariants.length === 0 && (
+          {!loading && variants.length === 0 && (
             <div className="p-4 rounded-xl border text-sm opacity-70">
               Noch nichts generiert. Wähle oben Typ & fülle das Formular aus.
             </div>
           )}
         </div>
 
-        {/* Library-Filter */}
+        {/* Library */}
         <div className="mt-10 mb-3 p-3 rounded-xl border bg-white dark:bg-neutral-800">
           <div className="grid md:grid-cols-4 gap-3 items-end">
             <div className="md:col-span-2">
               <label className="block text-xs uppercase tracking-wide mb-1">Suche (Topic/Output)</label>
-              <input
-                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
-                value={libSearch}
-                onChange={(e) => setLibSearch(e.target.value)}
-                placeholder="z. B. Muskelaufbau oder 'Hook Formel'"
-              />
+              <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={libSearch} onChange={(e) => setLibSearch(e.target.value)}
+                placeholder="z. B. Muskelaufbau oder 'Hook Formel'" />
             </div>
             <div>
               <label className="block text-xs uppercase tracking-wide mb-1">Typ</label>
-              <select
-                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
-                value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value as any)}
-              >
+              <select className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as any)}>
                 <option value="all">Alle</option>
                 <option value="hook">Hooks</option>
                 <option value="script">Skripte</option>
@@ -634,21 +651,16 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <input id="favOnly" type="checkbox" checked={favOnly} onChange={(e) => setFavOnly(e.target.checked)} />
-              <label htmlFor="favOnly" className="text-sm">
-                Nur Favoriten
-              </label>
+              <label htmlFor="favOnly" className="text-sm">Nur Favoriten</label>
             </div>
           </div>
         </div>
 
-        {/* Library */}
         <h2 className="text-lg font-semibold mb-2">Meine Library</h2>
         <button onClick={loadLibrary} className="mb-2 px-3 py-1 rounded-lg border text-sm" disabled={libLoading}>
           {libLoading ? "Lade…" : "Neu laden"}
         </button>
-        <div className="text-xs opacity-70 mb-3">
-          {library.length} Ergebnisse {libLoading && "• lädt…"}
-        </div>
+        <div className="text-xs opacity-70 mb-3">{library.length} Ergebnisse {libLoading && "• lädt…"}</div>
 
         <div className="grid gap-3">
           {library.map((row) => (
@@ -660,9 +672,7 @@ export default function App() {
                 <button
                   onClick={() => toggleFavorite(row)}
                   title={row.favorite ? "Als Nicht-Favorit markieren" : "Als Favorit markieren"}
-                  className={
-                    "px-2 py-1 rounded-lg border text-xs " + (row.favorite ? "bg-yellow-200 dark:bg-yellow-600" : "")
-                  }
+                  className={"px-2 py-1 rounded-lg border text-xs " + (row.favorite ? "bg-yellow-200 dark:bg-yellow-600" : "")}
                 >
                   {row.favorite ? "★ Favorit" : "☆ Favorit"}
                 </button>
