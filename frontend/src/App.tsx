@@ -32,7 +32,21 @@ function useDebounced<T>(value: T, delay = 300) {
   return debounced;
 }
 
-/** Query/LocalStorage Flags */
+/** Hilfsfunktion: egal was vom Backend kommt → Array<string> */
+function normalizeVariants(v: unknown): string[] {
+  try {
+    if (Array.isArray(v)) return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+    if (typeof v === "string") return [v].filter(Boolean);
+    if (v && typeof v === "object" && "text" in (v as any) && typeof (v as any).text === "string") {
+      return [(v as any).text];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/** Onboarding komplett manuell (nie auto) */
 const DISABLE_ONBOARDING =
   (typeof window !== "undefined" &&
     (new URLSearchParams(window.location.search).get("noob") === "1" ||
@@ -67,7 +81,7 @@ export default function App() {
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
 
-  // Onboarding (opt-in, NICHT automatisch)
+  // Onboarding (nur per Button)
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Library-Filter & Suche
@@ -131,7 +145,7 @@ export default function App() {
     return () => sub?.subscription?.unsubscribe?.();
   }, []);
 
-  // E-Mail des Users in users_public upserten (→ setze onboarding_done TRUE)
+  // users_public upserten (onboarding_done gleich TRUE, damit nie null)
   useEffect(() => {
     const upsertEmail = async () => {
       if (!session?.user) return;
@@ -145,23 +159,7 @@ export default function App() {
     upsertEmail().catch(() => {});
   }, [session]);
 
-  // Onboarding-Flag NICHT automatisch öffnen (nur Info laden, falls du es später nutzen willst)
-  useEffect(() => {
-    (async () => {
-      if (!session?.user) return;
-      const { error } = await supabase
-        .from("users_public")
-        .select("onboarding_done")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
-      if (!error) {
-        // nur Info – kein automatisches Öffnen
-        // wenn du testen willst: setShowOnboarding(!DISABLE_ONBOARDING && data?.onboarding_done === false);
-      }
-    })().catch(() => {});
-  }, [session]);
-
-  // ---- Warmup ----
+  // Warmup
   const warmup = useCallback(async () => {
     setNetHint(null);
     try {
@@ -181,7 +179,7 @@ export default function App() {
     warmup();
   }, [warmup]);
 
-  // ---- Credits laden ----
+  // Credits laden
   const fetchCredits = useCallback(async () => {
     if (!accessToken) {
       setCredits({ limit: 0, used: 0, remaining: 0, authenticated: false });
@@ -205,7 +203,7 @@ export default function App() {
     fetchCredits();
   }, [fetchCredits]);
 
-  // ---- Library laden (mit Filtern/Suche) ----
+  // Library laden (mit Filtern/Suche)
   const loadLibrary = useCallback(async () => {
     if (!session) return;
     setLibLoading(true);
@@ -236,7 +234,6 @@ export default function App() {
     loadLibrary();
   }, [loadLibrary]);
 
-  // Bei Filter/Suche zusätzlich neu laden
   useEffect(() => {
     loadLibrary();
   }, [typeFilter, favOnly, debouncedSearch, loadLibrary]);
@@ -253,15 +250,15 @@ export default function App() {
     setError(null);
     setNetHint(null);
     setVariants([]);
+
     try {
-      // 1) normaler POST (mit Token, Credits)
+      // 1) POST (mit Token, Credits)
       const res = await fetch(api("/api/v1/generate"), {
         method: "POST",
         headers: buildHeaders(true),
-        body: JSON.stringify({ type, topic, niche, tone }),
+        body: JSON.stringify({ type, topic, niche, tone /* , engine: "local"  // <- zum Testen nur Local */ }),
       });
 
-      // Engine & Tokens aus Response-Headern lesen (falls vorhanden)
       const engHeader = res.headers.get("X-Engine");
       if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : "Local");
 
@@ -290,17 +287,17 @@ export default function App() {
         setEngine(data.engine === "llm" ? "LLM (Grok 4 Fast)" : "Local");
       }
 
-      setVariants((data?.variants ?? []) as string[]);
+      setVariants(normalizeVariants(data?.variants));
       fetchCredits().catch(() => {});
       return;
     } catch (e: any) {
-      // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
+      // 2) GET Fallback (keine Credits)
       try {
         const params = new URLSearchParams({ type, topic, niche, tone });
         const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
-
         const data = await fetchJSON(url, { headers: buildHeaders(false) });
-        setVariants((data?.variants ?? []) as string[]);
+
+        setVariants(normalizeVariants(data?.variants));
         setEngine("Local (Fallback)");
         setTokenInfo({});
         setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
@@ -313,7 +310,7 @@ export default function App() {
             `Debug:
 - API_BASE: ${API_BASE}
 - Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
-- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
+- Falls POST blockiert, nutzen wir vorerst GET /generate_simple.`
           );
         }
       }
@@ -332,7 +329,7 @@ export default function App() {
       try {
         const uid = session.user.id; // RLS
         const { error } = await supabase.from("generations").insert({
-          user_id: uid, // RLS-konform
+          user_id: uid,
           type,
           input: { topic, niche, tone },
           output: variant,
@@ -350,7 +347,6 @@ export default function App() {
     [session, type, topic, niche, tone, loadLibrary]
   );
 
-  // Favoriten-Toggle
   const toggleFavorite = useCallback(async (row: GenRow) => {
     try {
       const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
@@ -433,12 +429,15 @@ export default function App() {
 
   const limitReached = credits.authenticated && credits.limit > 0 && credits.remaining <= 0;
 
+  // SAFE: nie wieder .map() auf Nicht-Array
+  const safeVariants = Array.isArray(variants) ? variants : [];
+
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
-        <p className="text-sm opacity-70">
+          <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
@@ -456,7 +455,6 @@ export default function App() {
           <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showSettings ? "Close Settings" : "Settings"}
           </button>
-          {/* Onboarding bewusst nur manuell öffnen */}
           {!DISABLE_ONBOARDING && (
             <button onClick={() => setShowOnboarding(true)} className="px-3 py-1 rounded-lg border text-sm">
               Onboarding
@@ -469,18 +467,16 @@ export default function App() {
         </div>
       </header>
 
-      {/* Onboarding-Modal – nur manuell, nie automatisch */}
+      {/* Onboarding-Modal – nur manuell */}
       {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
-        {/* Settings-Panel */}
         {showSettings && (
           <div className="mb-6">
             <Settings />
           </div>
         )}
 
-        {/* Planner-Panel */}
         {showPlanner && (
           <div className="mb-6">
             <Planner />
@@ -552,7 +548,7 @@ export default function App() {
 
         {/* Ergebnisse */}
         <div className="mt-6 grid gap-3">
-          {variants.map((v, i) => (
+          {safeVariants.map((v, i) => (
             <div key={i} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
               <div className="flex items-start justify-between gap-3">
                 <pre className="whitespace-pre-wrap font-sans text-sm">{v}</pre>
@@ -570,15 +566,14 @@ export default function App() {
                   >
                     {busySaveId !== null ? "Speichere…" : "Speichern"}
                   </button>
-                  {/* Optional: direkt als Favorit speichern */}
                   <button
                     onClick={async () => {
                       if (!session) return alert("Bitte einloggen.");
                       setBusySaveId(1);
                       try {
-                        const uid = session.user.id; // RLS
+                        const uid = session.user.id;
                         const { error } = await supabase.from("generations").insert({
-                          user_id: uid, // RLS-konform
+                          user_id: uid,
                           type,
                           input: { topic, niche, tone },
                           output: v,
@@ -604,7 +599,7 @@ export default function App() {
               </div>
             </div>
           ))}
-          {!loading && variants.length === 0 && (
+          {!loading && safeVariants.length === 0 && (
             <div className="p-4 rounded-xl border text-sm opacity-70">
               Noch nichts generiert. Wähle oben Typ & fülle das Formular aus.
             </div>
@@ -658,7 +653,6 @@ export default function App() {
         <div className="grid gap-3">
           {library.map((row) => (
             <div key={row.id} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
-              {/* Header mit Star-Toggle */}
               <div className="flex items-center justify-between mb-1">
                 <div className="text-xs opacity-70">
                   {row.type.toUpperCase()} • {new Date(row.created_at).toLocaleString()}
