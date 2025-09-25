@@ -121,7 +121,7 @@ export default function App() {
       setSession(s);
       setAccessToken(s?.access_token || null);
     });
-    return () => sub.subscription.unsubscribe();
+    return () => sub?.subscription?.unsubscribe?.();
   }, []);
 
   // E-Mail des Users in users_public upserten (damit Planner/Reminder Mails senden kann)
@@ -285,13 +285,12 @@ export default function App() {
     } catch (e: any) {
       // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
       try {
-        const url = new URL(api("/api/v1/generate_simple"));
-        url.searchParams.set("type", type);
-        url.searchParams.set("topic", topic);
-        url.searchParams.set("niche", niche);
-        url.searchParams.set("tone", tone);
+        const params = new URLSearchParams({
+          type, topic, niche, tone
+        });
+        const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
 
-        const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
+        const data = await fetchJSON(url, { headers: buildHeaders(false) });
         setVariants((data?.variants ?? []) as string[]);
         setEngine("Local (Fallback)");
         setTokenInfo({});
@@ -303,9 +302,9 @@ export default function App() {
         if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
           setNetHint(
             `Debug:
-- API_BASE: ${API_BASE}
-- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
-- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
+      - API_BASE: ${API_BASE}
+      - Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
+      - Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
           );
         }
       }
