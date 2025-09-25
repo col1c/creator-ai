@@ -55,45 +55,56 @@ def _user_prompt(kind: str, topic: str, niche: str, tone: str, voice: dict | Non
     hashtags_base = v.get("hashtags_base", [])
 
     base = [
+        "LANGUAGE: German (Du-Form).",
         f"TYPE: {kind}",
         f"TOPIC: {topic}",
         f"NICHE: {niche}",
         f"TONE: {tone}",
         f"EMOJIS_ALLOWED: {bool(emojis)}",
         f"FORBIDDEN_WORDS: [{forbidden}]",
+        "GLOBAL RULES:",
+        "- Antwort NUR als JSON nach Schema {\"variants\": [\"...\"]}.",
+        "- Keine Erklärungen, kein Markdown, keine Code-Fences.",
+        "- Keine doppelten Varianten.",
+        "- Keine Hashtags in Hooks/Captions (außer im Hashtag-Mode).",
+        "- Wenn EMOJIS_ALLOWED=false → keinerlei Emojis verwenden."
     ]
-    if ctas:
-        base.append("CTAS: " + " | ".join(ctas))
-    if hashtags_base:
-        base.append("BASE_HASHTAGS: " + " ".join(hashtags_base))
+    if ctas: base.append("CTAS: " + " | ".join(ctas))
+    if hashtags_base: base.append("BASE_HASHTAGS: " + " ".join(hashtags_base))
 
-    # Vorgaben pro Typ
     if kind == "hook":
         base += [
-            "OUTPUT: 10 hooks, max 9 words each, punchy.",
-            "NO explanations."
+            "HOOK RULES:",
+            "- Gib GENAU 10 Hooks.",
+            "- Jede Hook 7–9 Wörter, maximal 1 Satz.",
+            "- Punchy, konkret, alltagstaugliche Umgangssprache.",
+            "- Bevorzuge Zahlen, Kontrast/‘Gegenteil’-Frames, starke Nutzenbotschaft.",
+            "- Kein Punkt am Ende, keine Emojis (wenn verboten), keine Hashtags.",
         ]
     elif kind == "script":
         base += [
-            "OUTPUT: 2 scripts (30-45s) with structure: Hook -> 3 Value points -> CTA.",
-            "Use simple sentences, active voice."
+            "SCRIPT RULES:",
+            "Gib 2 Skripte (30–45s): Hook -> 3 Value-Punkte -> CTA.",
+            "Kurze Sätze, aktive Verben, konkrete Tipps.",
         ]
     elif kind == "caption":
         base += [
-            "OUTPUT: 3 captions: short (~15 words), medium (~35 words), long (~60-80 words).",
-            "Add exactly 1 CTA line to the long variant if CTAs are given."
+            "CAPTION RULES:",
+            "Gib 3 Captions: kurz (~15 Wörter), mittel (~35), lang (~60–80).",
+            "Zur langen Caption genau 1 CTA-Zeile, falls CTAs vorhanden.",
         ]
     elif kind == "hashtags":
         base += [
-            "OUTPUT: 12-16 hashtags. Start with BASE_HASHTAGS if provided, then niche-specific, then 2-3 broad.",
-            "No duplicates."
+            "HASHTAG RULES:",
+            "Gib 12–16 Hashtags. Starte mit BASE_HASHTAGS (falls vorhanden), dann Nischen-Tags, dann 2–3 breite.",
+            "Keine Duplikate.",
         ]
 
-    # Verbote
     if forbidden:
-        base.append("Mask or avoid any FORBIDDEN_WORDS.")
+        base.append("Vermeide oder maskiere FORBIDDEN_WORDS.")
 
     return "\n".join(base)
+
 
 def _parse_variants(content: str) -> List[str]:
     # JSON direkt
@@ -151,3 +162,20 @@ def call_openrouter(kind: str, topic: str, niche: str, tone: str, voice: dict | 
 
     content = data["choices"][0]["message"]["content"]
     return _parse_variants(content)
+
+import time
+
+def call_openrouter_retry(kind: str, topic: str, niche: str, tone: str, voice: dict | None, attempts: int = 2, backoff: float = 0.8):
+    last_err = None
+    for i in range(attempts):
+        try:
+            return call_openrouter(kind, topic, niche, tone, voice)
+        except RuntimeError as e:
+            last_err = e
+            msg = str(e)
+            if "429" in msg and i + 1 < attempts:
+                time.sleep(backoff * (i + 1))
+                continue
+            raise
+    if last_err:
+        raise last_err

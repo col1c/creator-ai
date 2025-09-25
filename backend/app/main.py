@@ -1,14 +1,15 @@
 # app/main.py
 from datetime import datetime, timezone
 from typing import Literal
+import os
 
-from fastapi import FastAPI, HTTPException, Header, Response, Query
+from fastapi import FastAPI, HTTPException, Header, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from .llm_openrouter import call_openrouter_retry
 from .config import settings
 from .gen import generate
-from .llm_openrouter import call_openrouter
 from .supa import (
     get_user_from_token,
     get_profile,
@@ -17,8 +18,9 @@ from .supa import (
     log_usage,
     month_start_utc,
 )
+from .ratelimit import check_allow  # Rate limit helper
 
-app = FastAPI(title="Creator AI Backend", version="0.3.7")
+app = FastAPI(title="Creator AI Backend", version="0.3.8")
 
 # CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(
@@ -27,7 +29,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Engine"],  # wichtig fürs Frontend-Badge
+    expose_headers=["X-Engine", "X-RateLimit-Limit"],  # wichtig fürs Frontend-Badge/Debug
 )
 
 # ---- universal OPTIONS handler (Preflight) ----
@@ -59,7 +61,14 @@ class GenerateIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.7"}
+    return {"ok": True, "version": "0.3.8"}
+
+# ---- kleiner Helper für Rate-Limit ----
+def _rate_limit_or_429(request: Request, user_id: str | None):
+    key = user_id or (request.client.host if request.client else "anon")
+    ok, lim, used = check_allow(key)
+    if not ok:
+        raise HTTPException(status_code=429, detail="Zu viele Anfragen. Warte kurz.")
 
 # ---- Credits (mit Fallback 50) ----
 @app.get("/api/v1/credits")
@@ -102,9 +111,18 @@ def get_credits(authorization: str | None = Header(default=None)):
         "user": {"id": user_id, "email": user.get("email")},
     }
 
-# ---- POST Generate (Brand-Voice + Credits + LLM-Switch) ----
+# ---- POST Generate (Brand-Voice + Credits + LLM-Switch + Rate-Limit) ----
 @app.post("/api/v1/generate", response_model=None)
-def api_generate(payload: GenerateIn, response: Response, authorization: str | None = Header(default=None)):
+def api_generate(
+    payload: GenerateIn,
+    response: Response,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    # Rate-limit (vor Auth)
+    _rate_limit_or_429(request, None)
+    response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
+
     # --- Auth + Credits defensiv ---
     user_id = None
     if authorization and authorization.lower().startswith("bearer "):
@@ -114,6 +132,10 @@ def api_generate(payload: GenerateIn, response: Response, authorization: str | N
             user_id = user.get("id")
         except Exception:
             user_id = None
+
+    # Optional: nach Bestimmung des Users strenger limitieren
+    if user_id:
+        _rate_limit_or_429(request, user_id)
 
     if user_id:
         try:
@@ -154,12 +176,8 @@ def api_generate(payload: GenerateIn, response: Response, authorization: str | N
     # --- LLM zuerst (wenn konfiguriert / erlaubt) ---
     if use_llm:
         try:
-            variants = call_openrouter(
-                payload.type,
-                payload.topic.strip(),
-                payload.niche.strip(),
-                payload.tone.strip(),
-                voice,
+            variants = call_openrouter_retry(
+                payload.type, payload.topic.strip(), payload.niche.strip(), payload.tone.strip(), voice
             )
             response.headers["X-Engine"] = "llm"
             return {
@@ -187,17 +205,20 @@ def api_generate(payload: GenerateIn, response: Response, authorization: str | N
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---- GET-Fallback (debug; KEINE Credits) ----
+# ---- GET-Fallback (debug; KEINE Credits) + Rate-Limit ----
 @app.get("/api/v1/generate_simple", response_model=None)
 def api_generate_simple(
     type: str = Query(..., pattern="^(hook|script|caption|hashtags)$"),
     topic: str = Query(..., min_length=2),
     niche: str = Query("allgemein"),
     tone: str = Query("locker"),
-    response: Response = None,  # <-- nur wenn du willst: Response hier auch nicht optional machen
+    response: Response = None,
+    request: Request = None,
 ):
-    # ACHTUNG: Falls FastAPI meckert, einfach 'response: Response' ohne Default benutzen.
+    # ACHTUNG: Wenn FastAPI Ärger mit Defaults macht, setze die Signatur auf (response: Response, request: Request)
     response = response or Response()
+    _rate_limit_or_429(request, None)
+    response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
     try:
         result = generate(type, topic.strip(), niche.strip(), tone.strip())
         response.headers["X-Engine"] = "local"

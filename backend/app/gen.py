@@ -28,26 +28,50 @@ def _append_cta(txt: str, ctas: list[str]) -> str:
     if not cta: return txt
     return f"{txt}\nCTA: {cta}"
 
+def _words(text: str) -> list[str]:
+    # trennt auf Leerzeichen, entfernt doppelte, säubert Satzzeichen am Ende
+    t = re.sub(r"[.!?️]+$", "", text.strip())
+    return [w for w in re.split(r"\s+", t) if w]
+
+def _tighten_to_range(s: str, lo=7, hi=9) -> str:
+    ws = _words(s)
+    if len(ws) < lo:
+        return " ".join(ws)  # kürzer lassen, falls zu kurz
+    if len(ws) > hi:
+        ws = ws[:hi]
+    return " ".join(ws)
+
 def gen_hooks(topic: str, niche: str, tone: str, voice: dict | None) -> list[str]:
     v = _norm_voice(voice)
     patterns = [
-        "Der größte Fehler bei {topic} (den 90% machen)",
-        "3 Fakten zu {topic}, die dich überraschen werden",
-        "Warum {topic} in {niche} 2025 alles verändert",
-        "Niemand sagt dir das über {topic}…",
-        "{topic} in 30 Sekunden: Das musst du wissen",
-        "Die 5-Sekunden-Regel für {topic}",
-        "Wenn ich heute bei {topic} neu starten würde…",
-        "So machst du {topic} 10× schneller",
-        "Stop doing this: {topic} in {niche}",
-        "Bevor du mit {topic} anfängst, sieh das"
+        "Der größte Fehler bei {topic}",
+        "3 schnelle Schritte für {topic}",
+        "{topic} in {niche}: so klappt’s",
+        "Warum {topic} heute Pflicht ist",
+        "Niemand sagt dir das über {topic}",
+        "{topic} ohne teure Tools",
+        "{topic}: die 80/20-Abkürzung",
+        "So startest du {topic} richtig",
+        "Stop wasting Zeit: {topic}",
+        "Bevor du {topic} beginnst, lies das"
     ]
     base = [p.format(topic=topic, niche=niche) for p in patterns]
-    if "locker" in (v["tone"] or tone):
-        base = [b.replace("…", " 😮").replace("!", "") for b in base]
-    base = [_strip_forbidden(b, v["forbidden"]) for b in base]
-    base = _maybe_drop_emojis(base, v["emojis"])
-    return base[:10]
+    if "locker" in (v["tone"] or tone).lower():
+        base = [b.replace("Niemand sagt dir das über", "Das sagt dir keiner über") for b in base]
+
+    # 7–9 Wörter, Emojis ggf. entfernen, verbotene Wörter maskieren
+    outs = []
+    seen = set()
+    for b in base:
+        h = _tighten_to_range(b, 7, 9)
+        h = _strip_forbidden(h, v["forbidden"])
+        if not v["emojis"]:
+            h = re.sub(r"[^\w\s\-.,?€%]", "", h)
+        if h.lower() not in seen:
+            seen.add(h.lower())
+            outs.append(h)
+    return outs[:10]
+
 
 def gen_script(topic: str, niche: str, tone: str, voice: dict | None, seconds: int = 35) -> list[str]:
     v = _norm_voice(voice)
