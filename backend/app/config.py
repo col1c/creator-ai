@@ -18,4 +18,8 @@ class Settings(BaseModel):
     LLM_REASONING: str = os.getenv("LLM_REASONING", "off")  # "on"|"off"
     LLM_JSON_MODE: str = os.getenv("LLM_JSON_MODE", "on")   # "on"|"off"
 
+    CRON_SECRET: str | None = os.getenv("CRON_SECRET")      # schützt /planner/remind
+    MAIL_FROM: str = os.getenv("DAILY_EMAIL_FROM", "noreply@example.com")
+    MAILGUN_REGION: str = os.getenv("MAILGUN_REGION", "eu")  # "us" | "eu"
+
 settings = Settings()

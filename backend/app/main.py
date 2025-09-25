@@ -7,6 +7,11 @@ from fastapi import FastAPI, HTTPException, Header, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from fastapi import Request
+from .mailer import send_mail
+from .config import settings
+from .supa import get_upcoming_slots, mark_reminded
+
 from .llm_openrouter import call_openrouter_retry
 from .config import settings
 from .gen import generate
@@ -226,3 +231,36 @@ def api_generate_simple(
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/v1/planner/remind")
+def planner_remind(request: Request, x_cron_secret: str | None = Header(default=None)):
+    # Schutz
+    if not settings.CRON_SECRET or x_cron_secret != settings.CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Ladet Slots der nächsten ~24-26h
+    slots = get_upcoming_slots(hours_ahead=26)
+    sent = 0
+    for s in slots:
+        email = (s.get("users_public") or {}).get("email")
+        if not email:
+            continue
+        dt = s.get("scheduled_at")
+        platform = s.get("platform")
+        note = s.get("note") or ""
+        subject = f"Reminder: {platform} Post um {dt}"
+        text = (
+            f"Hi!\n\n"
+            f"Erinnerung: Du hast einen geplanten {platform}-Post um {dt} (UTC).\n"
+            f"Notiz: {note}\n\n"
+            f"Viel Erfolg! 👌"
+        )
+        try:
+            send_mail(email, subject, text)
+            mark_reminded(int(s["id"]))
+            sent += 1
+        except Exception:
+            # weicher Fehler: skip
+            pass
+
+    return {"ok": True, "sent": sent, "checked": len(slots)}

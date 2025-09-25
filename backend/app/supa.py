@@ -1,10 +1,34 @@
 import os, httpx
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from .config import settings
 
 SUPABASE_URL = settings.SUPABASE_URL
 SERVICE_ROLE = settings.SUPABASE_SERVICE_ROLE
 ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # optional
+
+
+def get_upcoming_slots(hours_ahead: int = 26) -> list[dict]:
+    start = datetime.now(timezone.utc)
+    end = start + timedelta(hours=hours_ahead)
+    url = (
+        f"{SUPABASE_URL}/rest/v1/planner_slots"
+        f"?reminder_sent=is.false"
+        f"&scheduled_at=gte.{start.isoformat()}"
+        f"&scheduled_at=lt.{end.isoformat()}"
+        # Embed E-Mail aus users_public
+        f"&select=id,user_id,platform,scheduled_at,note,users_public(email)"
+        f"&order=scheduled_at.asc"
+    )
+    with httpx.Client(timeout=15.0) as c:
+        r = c.get(url, headers=_admin_headers())
+        r.raise_for_status()
+        return r.json()  # [{..., "users_public": {"email": "..."}}, ...]
+
+def mark_reminded(slot_id: int):
+    url = f"{SUPABASE_URL}/rest/v1/planner_slots?id=eq.{slot_id}"
+    with httpx.Client(timeout=10.0) as c:
+        r = c.patch(url, headers=_admin_headers(), json={"reminder_sent": True})
+        r.raise_for_status()
 
 def _admin_headers():
     if not SUPABASE_URL or not SERVICE_ROLE:

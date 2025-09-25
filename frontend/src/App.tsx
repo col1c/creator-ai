@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
 import Settings from "./Settings";
+import Planner from "./Planner";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -32,13 +33,14 @@ export default function App() {
 
   const [credits, setCredits] = useState<Credits>({ limit: 0, used: 0, remaining: 0, authenticated: false });
 
-  // NEW: Settings Toggle
+  // Toggles
   const [showSettings, setShowSettings] = useState(false);
+  const [showPlanner, setShowPlanner] = useState(false);
 
-  // NEW: Engine-Anzeige
+  // Engine-Anzeige
   const [engine, setEngine] = useState<string>("—");
 
-  // ---- Helper: Headers immer als Record<string,string> bauen ----
+  // ---- Helper: Headers bauen ----
   const buildHeaders = useCallback(
     (includeJson = false): HeadersInit => {
       const h: Record<string, string> = {};
@@ -49,7 +51,7 @@ export default function App() {
     [accessToken]
   );
 
-  // ---- Fetch-Helper mit Timeout + klaren Fehlermeldungen ----
+  // ---- Fetch-Helper ----
   const fetchJSON = useCallback(
     async (url: string, init?: RequestInit) => {
       const ctrl = new AbortController();
@@ -91,6 +93,20 @@ export default function App() {
     });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // E-Mail des Users in users_public upserten (separater Effect, NICHT in Callbacks/hooks verschachteln)
+  useEffect(() => {
+    const upsertEmail = async () => {
+      if (!session?.user) return;
+      await supabase
+        .from("users_public")
+        .upsert(
+          { user_id: session.user.id, email: session.user.email },
+          { onConflict: "user_id" }
+        );
+    };
+    upsertEmail().catch(() => {});
+  }, [session]);
 
   // ---- Warmup ----
   const warmup = useCallback(async () => {
@@ -171,7 +187,7 @@ export default function App() {
         body: JSON.stringify({ type, topic, niche, tone }),
       });
 
-      // NEW: Engine-Header lesen (sofort nach fetch)
+      // Engine-Header lesen
       const engHeader = res.headers.get("X-Engine");
       if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : "Local");
 
@@ -191,7 +207,6 @@ export default function App() {
       }
 
       const data = await res.json();
-      // Falls kein Header gesetzt war, versuche JSON-Feld
       if (!engHeader && data?.engine) {
         setEngine(data.engine === "llm" ? "LLM (Grok 4 Fast)" : "Local");
       }
@@ -210,7 +225,6 @@ export default function App() {
 
         const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
         setVariants((data?.variants ?? []) as string[]);
-        // NEW: Fallback-Engine markieren
         setEngine("Local (Fallback)");
         setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
         return;
@@ -282,7 +296,6 @@ export default function App() {
     </span>
   );
 
-  // NEW: Engine-Badge
   const EngineBadge = () => (
     <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>
   );
@@ -334,9 +347,10 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* NEW: Engine-Badge im Header */}
           <EngineBadge />
-          {/* Settings-Button */}
+          <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
+            {showPlanner ? "Close Planner" : "Planner"}
+          </button>
           <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showSettings ? "Close Settings" : "Settings"}
           </button>
@@ -348,10 +362,17 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
-        {/* NEW: Settings-Panel über den Tabs */}
+        {/* Settings-Panel */}
         {showSettings && (
           <div className="mb-6">
             <Settings />
+          </div>
+        )}
+
+        {/* Planner-Panel */}
+        {showPlanner && (
+          <div className="mb-6">
+            <Planner />
           </div>
         )}
 
