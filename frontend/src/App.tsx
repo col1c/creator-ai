@@ -32,6 +32,13 @@ function useDebounced<T>(value: T, delay = 300) {
   return debounced;
 }
 
+/** Query/LocalStorage Flags */
+const DISABLE_ONBOARDING =
+  (typeof window !== "undefined" &&
+    (new URLSearchParams(window.location.search).get("noob") === "1" ||
+      localStorage.getItem("disableOnboarding") === "1")) ||
+  false;
+
 export default function App() {
   const [session, setSession] = useState<Session>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
@@ -60,7 +67,7 @@ export default function App() {
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
 
-  // Onboarding
+  // Onboarding (opt-in, NICHT automatisch)
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Library-Filter & Suche
@@ -124,29 +131,32 @@ export default function App() {
     return () => sub?.subscription?.unsubscribe?.();
   }, []);
 
-  // E-Mail des Users in users_public upserten (damit Planner/Reminder Mails senden kann)
+  // E-Mail des Users in users_public upserten (→ setze onboarding_done TRUE)
   useEffect(() => {
     const upsertEmail = async () => {
       if (!session?.user) return;
       await supabase
         .from("users_public")
-        .upsert({ user_id: session.user.id, email: session.user.email }, { onConflict: "user_id" });
+        .upsert(
+          { user_id: session.user.id, email: session.user.email, onboarding_done: true },
+          { onConflict: "user_id" }
+        );
     };
     upsertEmail().catch(() => {});
   }, [session]);
 
-  // Onboarding-Flag prüfen
+  // Onboarding-Flag NICHT automatisch öffnen (nur Info laden, falls du es später nutzen willst)
   useEffect(() => {
     (async () => {
       if (!session?.user) return;
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from("users_public")
         .select("onboarding_done")
         .eq("user_id", session.user.id)
         .maybeSingle();
       if (!error) {
-        // Nur anzeigen, wenn der Wert EXPLIZIT false ist
-        setShowOnboarding(data?.onboarding_done === false);
+        // nur Info – kein automatisches Öffnen
+        // wenn du testen willst: setShowOnboarding(!DISABLE_ONBOARDING && data?.onboarding_done === false);
       }
     })().catch(() => {});
   }, [session]);
@@ -428,7 +438,7 @@ export default function App() {
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
-          <p className="text-sm opacity-70">
+        <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
@@ -446,6 +456,12 @@ export default function App() {
           <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showSettings ? "Close Settings" : "Settings"}
           </button>
+          {/* Onboarding bewusst nur manuell öffnen */}
+          {!DISABLE_ONBOARDING && (
+            <button onClick={() => setShowOnboarding(true)} className="px-3 py-1 rounded-lg border text-sm">
+              Onboarding
+            </button>
+          )}
           <CreditBadge />
           <button onClick={logout} className="px-3 py-1 rounded-lg border text-sm">
             Logout
@@ -453,7 +469,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Onboarding-Modal */}
+      {/* Onboarding-Modal – nur manuell, nie automatisch */}
       {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
