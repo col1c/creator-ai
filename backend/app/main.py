@@ -7,13 +7,11 @@ from fastapi import FastAPI, HTTPException, Header, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
-from fastapi import Request
 from .mailer import send_mail
 from .config import settings
 from .supa import get_upcoming_slots, mark_reminded
 
 from .llm_openrouter import call_openrouter_retry
-from .config import settings
 from .gen import generate
 from .supa import (
     get_user_from_token,
@@ -117,7 +115,7 @@ def get_credits(authorization: str | None = Header(default=None)):
     }
 
 # ---- POST Generate (Brand-Voice + Credits + LLM-Switch + Rate-Limit) ----
-@app.post("/api/v1/generate", response_model=None)
+@app.post("/api/v1/generate")
 def api_generate(
     payload: GenerateIn,
     response: Response,
@@ -211,27 +209,28 @@ def api_generate(
         raise HTTPException(status_code=400, detail=str(e))
 
 # ---- GET-Fallback (debug; KEINE Credits) + Rate-Limit ----
-@app.get("/api/v1/generate_simple", response_model=None)
+@app.get("/api/v1/generate_simple")
 def api_generate_simple(
     type: str = Query(..., pattern="^(hook|script|caption|hashtags)$"),
     topic: str = Query(..., min_length=2),
     niche: str = Query("allgemein"),
     tone: str = Query("locker"),
-    response: Response = None,
-    request: Request = None,
+    response: Response = None,   # wird von FastAPI injiziert
+    request: Request = None,     # wird von FastAPI injiziert
 ):
-    # ACHTUNG: Wenn FastAPI Ärger mit Defaults macht, setze die Signatur auf (response: Response, request: Request)
-    response = response or Response()
+    # Hinweis: FastAPI injiziert Response/Request auch mit Default-Werten.
     _rate_limit_or_429(request, None)
-    response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
+    if response is not None:
+        response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
+        response.headers["X-Engine"] = "local"
     try:
         result = generate(type, topic.strip(), niche.strip(), tone.strip())
-        response.headers["X-Engine"] = "local"
         result["engine"] = "local"
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# ---- Planner: E-Mail-Reminder (per CRON) ----
 @app.post("/api/v1/planner/remind")
 def planner_remind(request: Request, x_cron_secret: str | None = Header(default=None)):
     # Schutz

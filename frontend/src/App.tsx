@@ -3,6 +3,8 @@ import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
 import Settings from "./Settings";
 import Planner from "./Planner";
+import Landing from "./Landing";
+import Onboarding from "./Onboarding";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -19,6 +21,16 @@ type GenRow = {
   favorite: boolean;
 };
 type Credits = { limit: number; used: number; remaining: number; authenticated: boolean };
+
+/** Debounce-Hook für Suche */
+function useDebounced<T>(value: T, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 
 export default function App() {
   const [session, setSession] = useState<Session>(null);
@@ -44,8 +56,19 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
 
-  // Engine-Anzeige
+  // Engine- & Tokens-Anzeige
   const [engine, setEngine] = useState<string>("—");
+  const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
+
+  // Onboarding
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  // Library-Filter & Suche
+  const [libSearch, setLibSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<"all" | "hook" | "script" | "caption" | "hashtags">("all");
+  const [favOnly, setFavOnly] = useState(false);
+  const [libLoading, setLibLoading] = useState(false);
+  const debouncedSearch = useDebounced(libSearch, 300);
 
   // ---- Helper: Headers bauen ----
   const buildHeaders = useCallback(
@@ -101,7 +124,7 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // E-Mail des Users in users_public upserten
+  // E-Mail des Users in users_public upserten (damit Planner/Reminder Mails senden kann)
   useEffect(() => {
     const upsertEmail = async () => {
       if (!session?.user) return;
@@ -110,6 +133,21 @@ export default function App() {
         .upsert({ user_id: session.user.id, email: session.user.email }, { onConflict: "user_id" });
     };
     upsertEmail().catch(() => {});
+  }, [session]);
+
+  // Onboarding-Flag prüfen
+  useEffect(() => {
+    (async () => {
+      if (!session?.user) return;
+      const { data, error } = await supabase
+        .from("users_public")
+        .select("onboarding_done")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (!error) {
+        setShowOnboarding(!data?.onboarding_done);
+      }
+    })().catch(() => {});
   }, [session]);
 
   // ---- Warmup ----
@@ -156,20 +194,41 @@ export default function App() {
     fetchCredits();
   }, [fetchCredits]);
 
-  // ---- Library laden ----
+  // ---- Library laden (mit Filtern/Suche) ----
   const loadLibrary = useCallback(async () => {
     if (!session) return;
-    const { data, error } = await supabase
-      .from("generations")
-      .select("id,type,input,output,created_at,favorite")
-      .order("created_at", { ascending: false })
-      .limit(50);
-    if (!error && data) setLibrary(data as any);
-  }, [session]);
+    setLibLoading(true);
+    try {
+      let q = supabase
+        .from("generations")
+        .select("id,type,input,output,created_at,favorite")
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (typeFilter !== "all") q = q.eq("type", typeFilter);
+      if (favOnly) q = q.eq("favorite", true);
+
+      const s = debouncedSearch.trim();
+      if (s) {
+        const safe = s.replace(/%/g, "\\%").replace(/_/g, "\\_");
+        q = q.or(`output.ilike.%${safe}%,input->>topic.ilike.%${safe}%`);
+      }
+
+      const { data, error } = await q;
+      if (!error && data) setLibrary(data as any);
+    } finally {
+      setLibLoading(false);
+    }
+  }, [session, typeFilter, favOnly, debouncedSearch]);
 
   useEffect(() => {
     loadLibrary();
   }, [loadLibrary]);
+
+  // Bei Filter/Suche zusätzlich neu laden
+  useEffect(() => {
+    loadLibrary();
+  }, [typeFilter, favOnly, debouncedSearch, loadLibrary]);
 
   // ---- Aktionen ----
   const canGenerate = useMemo(
@@ -191,9 +250,14 @@ export default function App() {
         body: JSON.stringify({ type, topic, niche, tone }),
       });
 
-      // Engine-Header lesen
+      // Engine & Tokens aus Response-Headern lesen (falls vorhanden)
       const engHeader = res.headers.get("X-Engine");
       if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : "Local");
+
+      const tPrompt = Number(res.headers.get("X-Tokens-Prompt") || 0);
+      const tComp = Number(res.headers.get("X-Tokens-Completion") || 0);
+      const tTotal = Number(res.headers.get("X-Tokens-Total") || 0);
+      if (!Number.isNaN(tTotal)) setTokenInfo({ prompt: tPrompt, completion: tComp, total: tTotal });
 
       if (res.status === 429) {
         const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
@@ -230,16 +294,17 @@ export default function App() {
         const data = await fetchJSON(url.toString(), { headers: buildHeaders(false) });
         setVariants((data?.variants ?? []) as string[]);
         setEngine("Local (Fallback)");
+        setTokenInfo({});
         setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
         return;
       } catch (e2: any) {
-        const msg = e2?.message || e?.message || "Fehler bei der Generierung";
+        const msg = e2?.message || (e as any)?.message || "Fehler bei der Generierung";
         setError(msg);
         if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
           setNetHint(
             `Debug:
 - API_BASE: ${API_BASE}
-- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.4"} zeigen).
+- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
 - Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
           );
         }
@@ -257,9 +322,9 @@ export default function App() {
       }
       setBusySaveId(1);
       try {
-        const uid = session.user.id; // <-- WICHTIG für RLS
+        const uid = session.user.id; // RLS
         const { error } = await supabase.from("generations").insert({
-          user_id: uid,               // <-- NEU: RLS-konform
+          user_id: uid, // RLS-konform
           type,
           input: { topic, niche, tone },
           output: variant,
@@ -293,6 +358,7 @@ export default function App() {
     setLibrary([]);
     setCredits({ limit: 0, used: 0, remaining: 0, authenticated: false });
     setEngine("—");
+    setTokenInfo({});
   }, []);
 
   const Tab = ({ k, label }: { k: GenType; label: string }) => (
@@ -315,6 +381,10 @@ export default function App() {
 
   const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
 
+  const TokensBadge = () => (
+    <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>
+  );
+
   // ---- UI ----
   if (!session) {
     return (
@@ -329,7 +399,15 @@ export default function App() {
           )}
         </header>
         <main className="max-w-4xl mx-auto px-4 pb-24">
-          <Auth />
+          <Landing
+            onSignup={() => {
+              const authEl = document.getElementById("auth-root");
+              if (authEl) authEl.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          />
+          <div id="auth-root">
+            <Auth />
+          </div>
           {(error || netHint) && (
             <div className="mt-6 p-4 rounded-xl border text-sm">
               {error && <div className="mb-2 text-red-600">Fehler: {error}</div>}
@@ -353,8 +431,7 @@ export default function App() {
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
-            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API:{" "}
-            {API_BASE || "—"}
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
@@ -364,6 +441,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           <EngineBadge />
+          <TokensBadge />
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
           </button>
@@ -376,6 +454,9 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Onboarding-Modal */}
+      {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
         {/* Settings-Panel */}
@@ -481,9 +562,9 @@ export default function App() {
                       if (!session) return alert("Bitte einloggen.");
                       setBusySaveId(1);
                       try {
-                        const uid = session.user.id; // <-- WICHTIG für RLS
+                        const uid = session.user.id; // RLS
                         const { error } = await supabase.from("generations").insert({
-                          user_id: uid,       // <-- NEU: RLS-konform
+                          user_id: uid, // RLS-konform
                           type,
                           input: { topic, niche, tone },
                           output: v,
@@ -516,11 +597,50 @@ export default function App() {
           )}
         </div>
 
+        {/* Library-Filter */}
+        <div className="mt-10 mb-3 p-3 rounded-xl border bg-white dark:bg-neutral-800">
+          <div className="grid md:grid-cols-4 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label className="block text-xs uppercase tracking-wide mb-1">Suche (Topic/Output)</label>
+              <input
+                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={libSearch}
+                onChange={(e) => setLibSearch(e.target.value)}
+                placeholder="z. B. Muskelaufbau oder 'Hook Formel'"
+              />
+            </div>
+            <div>
+              <label className="block text-xs uppercase tracking-wide mb-1">Typ</label>
+              <select
+                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as any)}
+              >
+                <option value="all">Alle</option>
+                <option value="hook">Hooks</option>
+                <option value="script">Skripte</option>
+                <option value="caption">Captions</option>
+                <option value="hashtags">Hashtags</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <input id="favOnly" type="checkbox" checked={favOnly} onChange={(e) => setFavOnly(e.target.checked)} />
+              <label htmlFor="favOnly" className="text-sm">
+                Nur Favoriten
+              </label>
+            </div>
+          </div>
+        </div>
+
         {/* Library */}
-        <h2 className="text-lg font-semibold mt-10 mb-2">Meine Library</h2>
-        <button onClick={loadLibrary} className="mb-3 px-3 py-1 rounded-lg border text-sm">
-          Neu laden
+        <h2 className="text-lg font-semibold mb-2">Meine Library</h2>
+        <button onClick={loadLibrary} className="mb-2 px-3 py-1 rounded-lg border text-sm" disabled={libLoading}>
+          {libLoading ? "Lade…" : "Neu laden"}
         </button>
+        <div className="text-xs opacity-70 mb-3">
+          {library.length} Ergebnisse {libLoading && "• lädt…"}
+        </div>
+
         <div className="grid gap-3">
           {library.map((row) => (
             <div key={row.id} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
@@ -533,8 +653,7 @@ export default function App() {
                   onClick={() => toggleFavorite(row)}
                   title={row.favorite ? "Als Nicht-Favorit markieren" : "Als Favorit markieren"}
                   className={
-                    "px-2 py-1 rounded-lg border text-xs " +
-                    (row.favorite ? "bg-yellow-200 dark:bg-yellow-600" : "")
+                    "px-2 py-1 rounded-lg border text-xs " + (row.favorite ? "bg-yellow-200 dark:bg-yellow-600" : "")
                   }
                 >
                   {row.favorite ? "★ Favorit" : "☆ Favorit"}
@@ -549,7 +668,7 @@ export default function App() {
           ))}
           {library.length === 0 && (
             <div className="p-4 rounded-xl border text-sm opacity-70">
-              Noch nichts gespeichert. Speichere eine Variante aus den Ergebnissen.
+              Keine Ergebnisse. Passe Filter/Suche an oder speichere neue Varianten.
             </div>
           )}
         </div>

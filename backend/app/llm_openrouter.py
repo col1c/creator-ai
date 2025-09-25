@@ -161,7 +161,8 @@ def call_openrouter(kind: str, topic: str, niche: str, tone: str, voice: dict | 
         data = r.json()
 
     content = data["choices"][0]["message"]["content"]
-    return _parse_variants(content)
+    usage = _extract_usage(data)
+    return _parse_variants(content), usage
 
 import time
 
@@ -179,3 +180,11 @@ def call_openrouter_retry(kind: str, topic: str, niche: str, tone: str, voice: d
             raise
     if last_err:
         raise last_err
+
+def _extract_usage(data: dict) -> dict:
+    # robust gegen unterschiedliche Felder
+    u = data.get("usage") or {}
+    total = u.get("total_tokens") or u.get("total") or 0
+    prompt = u.get("prompt_tokens") or u.get("input_tokens") or u.get("prompt") or 0
+    completion = u.get("completion_tokens") or u.get("output_tokens") or u.get("completion") or 0
+    return {"prompt_tokens": int(prompt), "completion_tokens": int(completion), "total_tokens": int(total)}
