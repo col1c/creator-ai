@@ -145,7 +145,8 @@ export default function App() {
         .eq("user_id", session.user.id)
         .maybeSingle();
       if (!error) {
-        setShowOnboarding(!data?.onboarding_done);
+        // Nur anzeigen, wenn der Wert EXPLIZIT false ist
+        setShowOnboarding(data?.onboarding_done === false);
       }
     })().catch(() => {});
   }, [session]);
