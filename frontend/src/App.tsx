@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
 import Settings from "./Settings";
@@ -30,6 +30,44 @@ function useDebounced<T>(value: T, delay = 300) {
     return () => clearTimeout(t);
   }, [value, delay]);
   return debounced;
+}
+
+/** Globales Error-Overlay statt „weiße Seite“ (TS-typsicher) */
+function useGlobalErrorOverlay(): React.ReactElement | null {
+  const [err, setErr] = useState<unknown>(null);
+
+  useEffect(() => {
+    const onError = (e: ErrorEvent) => setErr(e.error ?? e.message ?? e);
+    const onRej = (e: PromiseRejectionEvent) => {
+      const reason: unknown = e.reason;
+      // reason kann alles sein: Error | string | object
+      const msg =
+        (reason as any)?.message ??
+        (typeof reason === "string" ? reason : undefined) ??
+        JSON.stringify(reason, null, 2);
+      setErr(msg ?? reason ?? e);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRej);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRej);
+    };
+  }, []);
+
+  if (!err) return null;
+  const msg = typeof err === "string" ? err : (err as any)?.message ?? String(err);
+  return (
+    <div className="fixed inset-0 z-[9999] bg-black/70 text-white p-4">
+      <div className="max-w-xl mx-auto mt-10 p-4 rounded-xl border border-white/30">
+        <div className="font-semibold mb-2">Unerwarteter Fehler</div>
+        <pre className="text-xs whitespace-pre-wrap">{msg}</pre>
+        <button onClick={() => location.reload()} className="mt-3 px-3 py-1 rounded-lg border text-sm">
+          Neu laden
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -69,6 +107,8 @@ export default function App() {
   const [favOnly, setFavOnly] = useState(false);
   const [libLoading, setLibLoading] = useState(false);
   const debouncedSearch = useDebounced(libSearch, 300);
+
+  const errorOverlay = useGlobalErrorOverlay();
 
   // ---- Helper: Headers bauen ----
   const buildHeaders = useCallback(
@@ -285,9 +325,7 @@ export default function App() {
     } catch (e: any) {
       // 2) Fallback: GET ohne Token (kein Preflight, keine Credits)
       try {
-        const params = new URLSearchParams({
-          type, topic, niche, tone
-        });
+        const params = new URLSearchParams({ type, topic, niche, tone });
         const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
 
         const data = await fetchJSON(url, { headers: buildHeaders(false) });
@@ -302,9 +340,9 @@ export default function App() {
         if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
           setNetHint(
             `Debug:
-      - API_BASE: ${API_BASE}
-      - Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
-      - Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
+- API_BASE: ${API_BASE}
+- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
+- Falls POST weiterhin blockiert, nutzen wir vorerst GET /generate_simple.`
           );
         }
       }
@@ -388,6 +426,7 @@ export default function App() {
   if (!session) {
     return (
       <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
+        {errorOverlay}
         <header className="max-w-4xl mx-auto px-4 py-6">
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">{warm ? "Backend bereit ✅" : "Backend wecken…"} • API: {API_BASE || "—"}</p>
@@ -426,6 +465,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
+      {errorOverlay}
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
