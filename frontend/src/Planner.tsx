@@ -3,7 +3,7 @@ import { supabase } from "./lib/supabaseClient";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import type { DropResult } from "@hello-pangea/dnd";
 
-/** API-Basis (für iCal-Export) */
+/** API-Basis (für iCal-Export – bewusst auf Alias-Rout e) */
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path}`;
@@ -54,6 +54,7 @@ export default function Planner() {
       if (error) throw error;
       setRows((data as Slot[]) || []);
     } catch (e: any) {
+      console.error(e);
       alert(e?.message || "Konnte Planner nicht laden.");
     } finally {
       setLoading(false);
@@ -80,6 +81,7 @@ export default function Planner() {
       setDtLocal("");
       await load();
     } catch (e: any) {
+      console.error(e);
       alert(e?.message || "Eintrag konnte nicht gespeichert werden.");
     }
   };
@@ -90,11 +92,12 @@ export default function Planner() {
       if (error) throw error;
       setRows((prev) => prev.filter((r) => r.id !== id));
     } catch (e: any) {
+      console.error(e);
       alert(e?.message || "Konnte Eintrag nicht löschen.");
     }
   };
 
-  /** iCal-Export (.ics herunterladen) – mit GET und Alias-Fallback */
+  /** iCal-Export – **nur** Alias-Route, um 405-Kollisionen zu vermeiden */
   const downloadIcs = async () => {
     try {
       const { data } = await supabase.auth.getSession();
@@ -103,24 +106,14 @@ export default function Planner() {
         alert("Bitte einloggen.");
         return;
       }
-      // Primärroute
-      let res = await fetch(api("/api/v1/planner/ical"), {
+      const res = await fetch(api("/api/v1/ical/planner"), {
         method: "GET",
         headers: { Authorization: `Bearer ${token}` },
       });
-
-      // Fallback bei 404/405/Not-OK → Alias verwenden
-      if (!res.ok && (res.status === 404 || res.status === 405)) {
-        res = await fetch(api("/api/v1/ical/planner"), {
-          method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      }
       if (!res.ok) {
         const txt = await res.text();
         throw new Error(txt || `HTTP ${res.status}`);
       }
-
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -131,6 +124,7 @@ export default function Planner() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e: any) {
+      console.error(e);
       alert(e?.message || "Konnte iCal nicht laden.");
     }
   };
@@ -164,34 +158,39 @@ export default function Planner() {
     const dstCol = destination.droppableId as Platform;
     if (!srcCol || !dstCol) return;
 
-    // ID als String belassen (UUID-safe)
+    // ID (UUID/Int) korrekt für Query
     const rawId = draggableId.replace(/^slot-/, "");
-    const id: string | number = rawId;
+    const idForQuery: string | number = /^\d+$/.test(rawId) ? Number(rawId) : rawId;
     if (!rawId) return;
 
     if (srcCol !== dstCol) {
       try {
-        // Optimistisch im UI updaten
+        // Optimistisch im UI
         setRows((prev) =>
           prev.map((r) => (String(r.id) === rawId ? { ...r, platform: dstCol } : r))
         );
 
-        // Persistieren
-        const { error } = await supabase
+        // Persistieren + Rückgabe prüfen
+        const { error, data } = await supabase
           .from("planner_slots")
           .update({ platform: dstCol })
-          .eq("id", id);
+          .eq("id", idForQuery)
+          .select("id, platform");
 
         if (error) throw error;
+        if (!data || !data.length) {
+          throw new Error("Update fehlgeschlagen (RLS/Policy?)");
+        }
 
-        // Server-Truth nachziehen
+        // Server-Stand laden
         await load();
       } catch (e: any) {
+        console.error(e);
         alert(e?.message || "Konnte Plattform nicht ändern.");
         load();
       }
     } else {
-      // Reorder innerhalb der Spalte: aktuell nur visuell (kein position-Feld)
+      // Reorder innerhalb der Spalte: aktuell nur visuell
     }
   };
 

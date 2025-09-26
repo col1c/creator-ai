@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from . import supa
+from .ical import router as ical_router  # NEU
 
 from .mailer import send_mail
 from .config import settings
@@ -31,6 +32,7 @@ from .ratelimit import check_allow  # Rate limit helper
 
 
 app = FastAPI(title="Creator AI Backend", version="0.4.0")
+app.include_router(ical_router)
 
 # CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(
