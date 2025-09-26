@@ -3,10 +3,15 @@ import { supabase } from "./lib/supabaseClient";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import type { DropResult } from "@hello-pangea/dnd";
 
+/** API-Basis (für iCal-Export) */
+const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
+const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
+const api = (path: string) => `${API_BASE}${path}`;
+
 type Platform = "tiktok" | "instagram" | "youtube" | "shorts" | "reels" | "other";
 
 type Slot = {
-  id: string | number;            // ← String ODER Number (UUID-safe)
+  id: string | number;            // UUID/Int sicher
   platform: Platform;
   scheduled_at: string;           // ISO UTC
   note: string | null;
@@ -89,6 +94,47 @@ export default function Planner() {
     }
   };
 
+  /** iCal-Export (.ics herunterladen) – mit GET und Alias-Fallback */
+  const downloadIcs = async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        alert("Bitte einloggen.");
+        return;
+      }
+      // Primärroute
+      let res = await fetch(api("/api/v1/planner/ical"), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      // Fallback bei 404/405/Not-OK → Alias verwenden
+      if (!res.ok && (res.status === 404 || res.status === 405)) {
+        res = await fetch(api("/api/v1/ical/planner"), {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "creatorai_planner.ics";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(e?.message || "Konnte iCal nicht laden.");
+    }
+  };
+
   // === DnD-Logik ===
   const grouped = useMemo(() => {
     const g: Record<Platform, Slot[]> = {
@@ -118,7 +164,7 @@ export default function Planner() {
     const dstCol = destination.droppableId as Platform;
     if (!srcCol || !dstCol) return;
 
-    // ID NICHT in Number casten (UUID-safe)
+    // ID als String belassen (UUID-safe)
     const rawId = draggableId.replace(/^slot-/, "");
     const id: string | number = rawId;
     if (!rawId) return;
@@ -126,7 +172,9 @@ export default function Planner() {
     if (srcCol !== dstCol) {
       try {
         // Optimistisch im UI updaten
-        setRows((prev) => prev.map((r) => (String(r.id) === rawId ? { ...r, platform: dstCol } : r)));
+        setRows((prev) =>
+          prev.map((r) => (String(r.id) === rawId ? { ...r, platform: dstCol } : r))
+        );
 
         // Persistieren
         const { error } = await supabase
@@ -136,11 +184,10 @@ export default function Planner() {
 
         if (error) throw error;
 
-        // Server-Truth nachziehen (für volle Sicherheit)
+        // Server-Truth nachziehen
         await load();
       } catch (e: any) {
         alert(e?.message || "Konnte Plattform nicht ändern.");
-        // Fallback: reload auf Server-Stand
         load();
       }
     } else {
@@ -218,6 +265,12 @@ export default function Planner() {
         >
           {loading ? "Lade…" : "Refresh"}
         </button>
+        <button
+          onClick={downloadIcs}
+          className="px-3 py-2 rounded-xl border"
+        >
+          Export .ics
+        </button>
       </div>
 
       {/* DnD-Board */}
@@ -245,8 +298,8 @@ export default function Planner() {
                     >
                       {items.map((r, idx) => (
                         <Draggable
-                          key={`slot-${String(r.id)}`}           // ← ID als String
-                          draggableId={`slot-${String(r.id)}`}    // ← ID als String
+                          key={`slot-${String(r.id)}`}
+                          draggableId={`slot-${String(r.id)}`}
                           index={idx}
                         >
                           {(p, snap) => (
