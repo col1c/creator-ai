@@ -1,29 +1,35 @@
 # app/main.py
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Optional
 import os
 
 from fastapi import FastAPI, HTTPException, Header, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from .mailer import send_mail
 from .config import settings
 from .supa import get_upcoming_slots, mark_reminded
-
 from .llm_openrouter import call_openrouter_retry
-from .gen import generate
+from .gen import generate as generate_local
+
+# Sync helpers (bestehend)
 from .supa import (
     get_user_from_token,
     get_profile,
     get_profile_full,        # Brand-Voice
     count_generates_this_month,
-    log_usage,
     month_start_utc,
 )
+
+# NEU/GEÄNDERT: Cache & async-Logging via supa + Cache-Key-Helper
+from .cache import make_cache_key, normalize_payload
+from . import supa  # enthält async: cache_get_by_key, cache_insert, log_usage
 from .ratelimit import check_allow  # Rate limit helper
 
-app = FastAPI(title="Creator AI Backend", version="0.3.8")
+
+app = FastAPI(title="Creator AI Backend", version="0.4.0")
 
 # CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(
@@ -32,13 +38,19 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Engine", "X-RateLimit-Limit"],  # wichtig fürs Frontend-Badge/Debug
+    expose_headers=[
+        "X-Engine",
+        "X-Cache",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+    ],  # wichtig fürs Frontend-Badge/Debug
 )
 
 # ---- universal OPTIONS handler (Preflight) ----
 @app.options("/{rest_of_path:path}")
 def options_handler(rest_of_path: str):
     return Response(status_code=204)
+
 
 class GenerateIn(BaseModel):
     # Engine-Switch (auto | llm | local)
@@ -62,20 +74,23 @@ class GenerateIn(BaseModel):
     def trim_fields(cls, v: str):
         return (v or "").strip()
 
+
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.8"}
+    return {"ok": True, "version": "0.4.0"}
+
 
 # ---- kleiner Helper für Rate-Limit ----
-def _rate_limit_or_429(request: Request, user_id: str | None):
+def _rate_limit_or_429(request: Request, user_id: Optional[str]):
     key = user_id or (request.client.host if request.client else "anon")
-    ok, lim, used = check_allow(key)
+    ok, _lim, _used = check_allow(key)
     if not ok:
         raise HTTPException(status_code=429, detail="Zu viele Anfragen. Warte kurz.")
 
+
 # ---- Credits (mit Fallback 50) ----
 @app.get("/api/v1/credits")
-def get_credits(authorization: str | None = Header(default=None)):
+async def get_credits(authorization: str | None = Header(default=None)):
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
@@ -89,7 +104,7 @@ def get_credits(authorization: str | None = Header(default=None)):
         }
 
     user_id = user.get("id")
-    prof = get_profile(user_id)
+    prof = get_profile(user_id) or {}
 
     try:
         limit_raw = prof.get("monthly_credit_limit", 50)
@@ -114,20 +129,37 @@ def get_credits(authorization: str | None = Header(default=None)):
         "user": {"id": user_id, "email": user.get("email")},
     }
 
-# ---- POST Generate (Brand-Voice + Credits + LLM-Switch + Rate-Limit) ----
+
+def _choose_output_from_variants(variants) -> str:
+    """
+    Nimmt die beste Variante (erste nicht-leere). Fallback: join mit newline.
+    """
+    if isinstance(variants, list):
+        for v in variants:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return "\n".join([str(v) for v in variants if v])
+    if isinstance(variants, str):
+        return variants.strip()
+    return str(variants)
+
+
+# ---- POST Generate (Brand-Voice + Credits + LLM-Switch + Rate-Limit + CACHE) ----
 @app.post("/api/v1/generate")
-def api_generate(
+async def api_generate(
     payload: GenerateIn,
     response: Response,
     request: Request,
     authorization: str | None = Header(default=None),
+    force: str | None = Query(default=None, description="Cache ignorieren (1/true/yes)"),
 ):
     # Rate-limit (vor Auth)
     _rate_limit_or_429(request, None)
     response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
 
     # --- Auth + Credits defensiv ---
-    user_id = None
+    user_id: Optional[str] = None
+    user = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
         try:
@@ -140,19 +172,17 @@ def api_generate(
     if user_id:
         _rate_limit_or_429(request, user_id)
 
+    # --- Credits vorberechnen (nur für Header/UX)
+    limit = 50
+    used = 0
     if user_id:
         try:
             prof = get_profile(user_id) or {}
             limit = int(prof.get("monthly_credit_limit") or 50)
+            if limit <= 0:
+                limit = 50
             used = count_generates_this_month(user_id)
-            if used >= limit:
-                raise HTTPException(status_code=429, detail="Monatslimit erreicht.")
-            try:
-                log_usage(user_id, "generate", {"type": payload.type})
-            except Exception:
-                pass
         except Exception:
-            # Credits-System gestört -> fail-open
             pass
 
     # --- Brand-Voice defensiv ---
@@ -162,51 +192,119 @@ def api_generate(
             full = get_profile_full(user_id) or {}
             voice = full.get("brand_voice") or {}
             if isinstance(voice, dict) and voice.get("tone"):
-                payload.tone = voice["tone"]
+                payload.tone = (voice.get("tone") or payload.tone or "").strip()
         except Exception:
             voice = None
 
+    # --- Cache prüfen ---
+    force_bypass = str(force or "").lower() in ("1", "true", "yes")
+    cache_key = make_cache_key(user_id or "anon", payload.type, payload.model_dump())
+    if user_id and not force_bypass:
+        hit = await supa.cache_get_by_key(cache_key, user_id)
+        if hit:
+            # Cache-Hit zählt NICHT gegen Credits
+            await supa.log_usage(user_id, "generate_cache_hit", {"type": payload.type, "cache_key": cache_key})
+            response.headers["X-Cache"] = "HIT"
+            response.headers["X-Engine"] = hit.get("model") or "cache"
+            # Remaining bleibt unverändert
+            response.headers["X-RateLimit-Remaining"] = str(max(0, limit - used))
+            return JSONResponse(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "type": payload.type,
+                    "output": hit["output"],
+                    "engine": "cache",
+                    "cached": True,
+                }
+            )
+
     # --- Engine-Switch bestimmen ---
     mode = (payload.engine or "auto").lower()
-    use_llm = False
-    if mode == "local":
-        use_llm = False
-    elif mode == "llm":
-        use_llm = bool(settings.OPENROUTER_API_KEY)
-    else:  # auto
-        use_llm = bool(settings.OPENROUTER_API_KEY)
+    use_llm = (mode == "llm") or (mode == "auto" and bool(settings.OPENROUTER_API_KEY))
+    output_text: Optional[str] = None
+    engine_used = "local"
+    model_name = None
+    tokens_in = None
+    tokens_out = None
 
     # --- LLM zuerst (wenn konfiguriert / erlaubt) ---
     if use_llm:
         try:
             variants = call_openrouter_retry(
-                payload.type, payload.topic.strip(), payload.niche.strip(), payload.tone.strip(), voice
+                payload.type,
+                payload.topic.strip(),
+                payload.niche.strip(),
+                payload.tone.strip(),
+                voice,
             )
-            response.headers["X-Engine"] = "llm"
-            return {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "type": payload.type,
-                "variants": variants,
-                "engine": "llm",
-            }
+            output_text = _choose_output_from_variants(variants)
+            engine_used = "llm"
+            model_name = getattr(settings, "OPENROUTER_MODEL", None) or "llm"
         except Exception:
             # Silent fallthrough → local
-            pass
+            output_text = None
 
     # --- Lokaler Fallback (kostenlos) ---
-    try:
-        result = generate(
-            payload.type,
-            payload.topic.strip(),
-            payload.niche.strip(),
-            payload.tone.strip(),
-            voice,
-        )
-        response.headers["X-Engine"] = "local"
-        result["engine"] = "local"
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if output_text is None:
+        try:
+            local = generate_local(
+                payload.type,
+                payload.topic.strip(),
+                payload.niche.strip(),
+                payload.tone.strip(),
+                voice,
+            )
+            # local kann {output} oder {variants} liefern
+            if isinstance(local, dict) and "output" in local:
+                output_text = str(local["output"]).strip()
+            elif isinstance(local, dict) and "variants" in local:
+                output_text = _choose_output_from_variants(local["variants"])
+            else:
+                output_text = _choose_output_from_variants(local)
+            engine_used = "local"
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if not output_text:
+        raise HTTPException(status_code=500, detail="Generation failed")
+
+    # --- Cache speichern (nur wenn User bekannt) ---
+    if user_id:
+        try:
+            await supa.cache_insert({
+                "cache_key": cache_key,
+                "user_id": user_id,
+                "type": payload.type,
+                "payload": normalize_payload(payload.model_dump()),
+                "output": output_text,
+                "model": model_name or engine_used,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            })
+        except Exception:
+            pass
+
+        # Credits-Log NUR bei MISS
+        try:
+            await supa.log_usage(user_id, "generate", {"type": payload.type, "cache_key": cache_key})
+        except Exception:
+            pass
+
+    # --- Response-Header setzen ---
+    response.headers["X-Cache"] = "MISS" if user_id and not force_bypass else ("BYPASS" if force_bypass else "MISS")
+    response.headers["X-Engine"] = engine_used
+    # Remaining: bei MISS (mit User) theoretisch -1; wir zeigen konservativ die aktuelle Schätzung
+    remaining = max(0, (limit - used) - (1 if (user_id and not force_bypass) else 0))
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "type": payload.type,
+        "output": output_text,
+        "engine": engine_used,
+        "cached": False if not force_bypass else False,
+    }
+
 
 # ---- GET-Fallback (debug; KEINE Credits) + Rate-Limit ----
 @app.get("/api/v1/generate_simple")
@@ -223,12 +321,20 @@ def api_generate_simple(
     if response is not None:
         response.headers["X-RateLimit-Limit"] = str(int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
         response.headers["X-Engine"] = "local"
+        response.headers["X-Cache"] = "DISABLED"
     try:
-        result = generate(type, topic.strip(), niche.strip(), tone.strip())
-        result["engine"] = "local"
-        return result
+        result = generate_local(type, topic.strip(), niche.strip(), tone.strip())
+        # Normalisiere auf {output}
+        if isinstance(result, dict) and "output" in result:
+            out = str(result["output"]).strip()
+        elif isinstance(result, dict) and "variants" in result:
+            out = _choose_output_from_variants(result["variants"])
+        else:
+            out = _choose_output_from_variants(result)
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "type": type, "output": out, "engine": "local"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 # ---- Planner: E-Mail-Reminder (per CRON) ----
 @app.post("/api/v1/planner/remind")
@@ -262,4 +368,4 @@ def planner_remind(request: Request, x_cron_secret: str | None = Header(default=
             # weicher Fehler: skip
             pass
 
-    return {"ok": True, "sent": sent, "checked": len(slots)}
+    return {"ok": True, "sent": int(sent), "checked": int(len(slots))}

@@ -2,6 +2,7 @@ import os, httpx
 from datetime import datetime, timezone, timedelta
 from .config import settings
 
+
 SUPABASE_URL = settings.SUPABASE_URL
 SERVICE_ROLE = settings.SUPABASE_SERVICE_ROLE
 ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # optional
@@ -99,3 +100,45 @@ def get_profile_full(user_id: str) -> dict:
         r.raise_for_status()
         rows = r.json()
     return rows[0] if rows else {"brand_voice": {}, "monthly_credit_limit": 50}
+
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
+
+def _headers():
+    return {
+        "apikey": SERVICE_ROLE,
+        "Authorization": f"Bearer {SERVICE_ROLE}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+async def cache_get_by_key(cache_key: str, user_id: str):
+    url = f"{SUPABASE_URL}/rest/v1/prompt_cache"
+    params = {
+        "cache_key": f"eq.{cache_key}",
+        "user_id": f"eq.{user_id}",
+        "limit": 1
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers=_headers(), params=params)
+        r.raise_for_status()
+        items = r.json()
+        return items[0] if items else None
+
+async def cache_insert(entry: dict):
+    url = f"{SUPABASE_URL}/rest/v1/prompt_cache"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, headers=_headers(), json=entry)
+        r.raise_for_status()
+        return r.json()[0] if r.text else None
+
+async def log_usage(user_id: str, event: str, meta: dict | None = None):
+    url = f"{SUPABASE_URL}/rest/v1/usage_log"
+    payload = {"user_id": user_id, "event": event, "meta": meta or {}}
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            await client.post(url, headers=_headers(), json=payload)
+        except Exception:
+            # Logging darf nie den Request sprengen
+            pass
+    return True

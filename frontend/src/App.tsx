@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
 import Settings from "./Settings";
@@ -44,19 +44,22 @@ function splitListString(s: string): string[] {
 
   // Falls ohnehin Zeilen
   if (work.includes("\n")) {
-    return work.split(/\n+/).map(x => x.replace(/^[\-\–—•●]\s*/, "").trim()).filter(Boolean);
+    return work
+      .split(/\n+/)
+      .map((x) => x.replace(/^[\-\–—•●]\s*/, "").trim())
+      .filter(Boolean);
   }
 
   // Sätze (Punkt/!/? + Großbuchstabe/Zahl)
   let parts = work.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/);
   if (parts.length > 1) {
-    return parts.map(p => p.trim()).filter(Boolean);
+    return parts.map((p) => p.trim()).filter(Boolean);
   }
 
-  // Dein Fall: Kommas vor Großbuchstaben/Zahlen (Listen in einer Zeile)
+  // Listen in einer Zeile: Komma + Großbuchstabe/Zahl
   const commaParts = work.split(/,\s+(?=[A-ZÄÖÜ0-9])/);
   if (commaParts.length >= 2) {
-    return commaParts.map(p => p.trim()).filter(Boolean);
+    return commaParts.map((p) => p.trim()).filter(Boolean);
   }
 
   // Fallback: nur ein Eintrag
@@ -84,12 +87,12 @@ function normalizeVariants(v: unknown): string[] {
           list.push(String(item));
         }
       }
-      // Einzelner Eintrag könnte eine Liste enthalten
+      // Einzelner Eintrag könnte Liste enthalten
       if (list.length === 1) {
         const sub = splitListString(list[0]);
         if (sub.length > 1) return sub;
       }
-      return list.map(s => s.trim()).filter(Boolean);
+      return list.map((s) => s.trim()).filter(Boolean);
     }
 
     // 2) String
@@ -147,6 +150,7 @@ export default function App() {
 
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
+  const [isCached, setIsCached] = useState(false); // zeigt X-Cache: HIT
 
   const [showOnboarding, setShowOnboarding] = useState(false);
 
@@ -155,6 +159,8 @@ export default function App() {
   const [favOnly, setFavOnly] = useState(false);
   const [libLoading, setLibLoading] = useState(false);
   const debouncedSearch = useDebounced(libSearch, 300);
+
+  const lastReq = useRef<string>(""); // Doppel-Submit vermeiden
 
   const buildHeaders = useCallback(
     (includeJson = false): HeadersInit => {
@@ -214,10 +220,7 @@ export default function App() {
       if (!session?.user) return;
       await supabase
         .from("users_public")
-        .upsert(
-          { user_id: session.user.id, email: session.user.email, onboarding_done: true },
-          { onConflict: "user_id" }
-        );
+        .upsert({ user_id: session.user.id, email: session.user.email, onboarding_done: true }, { onConflict: "user_id" });
     };
     upsertEmail().catch(() => {});
   }, [session]);
@@ -307,79 +310,88 @@ export default function App() {
     [topic, niche, tone]
   );
 
-  const generate = useCallback(async () => {
-    if (!canGenerate) return;
-    setLoading(true);
-    setError(null);
-    setNetHint(null);
-    setVariants([]);
+  const doGenerate = useCallback(
+    async (force = false) => {
+      if (!canGenerate) return;
+      const fingerprint = JSON.stringify({ type, topic, niche, tone, force });
+      if (loading || fingerprint === lastReq.current) return;
+      lastReq.current = fingerprint;
 
-    try {
-      const res = await fetch(api("/api/v1/generate"), {
-        method: "POST",
-        headers: buildHeaders(true),
-        body: JSON.stringify({ type, topic, niche, tone }),
-      });
+      setLoading(true);
+      setError(null);
+      setNetHint(null);
+      setVariants([]);
+      setIsCached(false);
 
-      const engHeader = res.headers.get("X-Engine");
-      if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : "Local");
-
-      const tPrompt = Number(res.headers.get("X-Tokens-Prompt") || 0);
-      const tComp = Number(res.headers.get("X-Tokens-Completion") || 0);
-      const tTotal = Number(res.headers.get("X-Tokens-Total") || 0);
-      if (!Number.isNaN(tTotal)) setTokenInfo({ prompt: tPrompt, completion: tComp, total: tTotal });
-
-      if (res.status === 429) {
-        const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
-        throw new Error(j?.detail || "Monatslimit erreicht");
-      }
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        try {
-          const j = text ? JSON.parse(text) : {};
-          throw new Error(j?.detail || j?.message || `HTTP ${res.status}: ${res.statusText}`);
-        } catch {
-          throw new Error(text || `HTTP ${res.status}: ${res.statusText}`);
-        }
-      }
-
-      const data = await res.json();
-      if (!engHeader && data?.engine) {
-        setEngine(data.engine === "llm" ? "LLM (Grok 4 Fast)" : "Local");
-      }
-
-      setVariants(normalizeVariants(data?.variants));
-      fetchCredits().catch(() => {});
-      return;
-    } catch (e: any) {
-      // GET Fallback
       try {
-        const params = new URLSearchParams({ type, topic, niche, tone });
-        const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
-        const data = await fetchJSON(url, { headers: buildHeaders(false) });
+        const url = `${api("/api/v1/generate")}${force ? "?force=1" : ""}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: buildHeaders(true),
+          body: JSON.stringify({ type, topic, niche, tone }),
+        });
 
-        setVariants(normalizeVariants(data?.variants));
-        setEngine("Local (Fallback)");
-        setTokenInfo({});
-        setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
-        return;
-      } catch (e2: any) {
-        const msg = e2?.message || (e as any)?.message || "Fehler bei der Generierung";
-        setError(msg);
-        if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
-          setNetHint(
-            `Debug:
-- API_BASE: ${API_BASE}
-- Öffne ${api("/health")} im Browser (soll {"ok":true,"version":"0.3.8"} zeigen).
-- Falls POST blockiert, nutzen wir vorerst GET /generate_simple.`
-          );
+        const engHeader = res.headers.get("X-Engine");
+        if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : engHeader);
+
+        // Token-Header (falls gesetzt)
+        const tPrompt = Number(res.headers.get("X-Tokens-Prompt") || 0);
+        const tComp = Number(res.headers.get("X-Tokens-Completion") || 0);
+        const tTotal = Number(res.headers.get("X-Tokens-Total") || 0);
+        if (!Number.isNaN(tTotal)) setTokenInfo({ prompt: tPrompt, completion: tComp, total: tTotal });
+
+        const cacheHdr = res.headers.get("X-Cache");
+        setIsCached(cacheHdr === "HIT");
+
+        if (res.status === 429) {
+          const j = await res.json().catch(() => ({ detail: "Monatslimit erreicht" }));
+          throw new Error(j?.detail || "Monatslimit erreicht");
         }
+
+        const text = await res.text().catch(() => "");
+        const data = text ? JSON.parse(text) : {};
+
+        if (!res.ok) {
+          throw new Error(data?.detail || data?.message || `HTTP ${res.status}: ${res.statusText}`);
+        }
+
+        // Backend kann {output} oder {variants} liefern
+        const arr = normalizeVariants(data?.variants ?? data?.output ?? "");
+        setVariants(arr);
+        fetchCredits().catch(() => {});
+        return;
+      } catch (e: any) {
+        // GET Fallback
+        try {
+          const params = new URLSearchParams({ type, topic, niche, tone });
+          const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
+          const data = await fetchJSON(url, { headers: buildHeaders(false) });
+
+          const arr = normalizeVariants(data?.variants ?? data?.output ?? "");
+          setVariants(arr);
+          setEngine("local");
+          setTokenInfo({});
+          setNetHint("Hinweis: Fallback-Route genutzt (keine Credits abgezogen). POST-Debug folgt.");
+          return;
+        } catch (e2: any) {
+          const msg = e2?.message || e?.message || "Fehler bei der Generierung";
+          setError(msg);
+          if (msg.includes("Netzwerk") || msg.includes("CORS") || msg.includes("VITE_API_BASE")) {
+            setNetHint(
+              `Debug:
+- API_BASE: ${API_BASE}
+- Öffne ${api("/health")} im Browser (soll {"ok":true} zeigen).
+- Falls POST blockiert, nutzen wir vorerst GET /generate_simple.`
+            );
+          }
+        }
+      } finally {
+        setLoading(false);
+        setTimeout(() => (lastReq.current = ""), 300);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON]);
+    },
+    [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON, loading]
+  );
 
   // Save
   const saveToLibrary = useCallback(
@@ -414,7 +426,7 @@ export default function App() {
   const toggleFavorite = useCallback(async (row: GenRow) => {
     try {
       const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
-    if (error) throw error;
+      if (error) throw error;
       setLibrary((prev) => prev.map((r) => (r.id === row.id ? { ...r, favorite: !r.favorite } : r)));
     } catch (e: any) {
       alert(e?.message || "Favorit konnte nicht geändert werden.");
@@ -427,6 +439,7 @@ export default function App() {
     setCredits({ limit: 0, used: 0, remaining: 0, authenticated: false });
     setEngine("—");
     setTokenInfo({});
+    setIsCached(false);
   }, []);
 
   const Tab = ({ k, label }: { k: GenType; label: string }) => (
@@ -448,6 +461,8 @@ export default function App() {
   );
 
   const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
+  const CacheBadge = () =>
+    isCached ? <span className="px-2 py-1 rounded-lg border text-xs">Cache</span> : null;
   const TokensBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>;
 
   // ---- UI ----
@@ -456,7 +471,9 @@ export default function App() {
       <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
         <header className="max-w-4xl mx-auto px-4 py-6">
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
-          <p className="text-sm opacity-70">{warm ? "Backend bereit ✅" : "Backend wecken…"} • API: {API_BASE || "—"}</p>
+          <p className="text-sm opacity-70">
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • API: {API_BASE || "—"}
+          </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
               Erneut prüfen
@@ -496,7 +513,8 @@ export default function App() {
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
-            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API:{" "}
+            {API_BASE || "—"}
           </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
@@ -506,6 +524,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           <EngineBadge />
+          <CacheBadge />
           <TokensBadge />
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
@@ -528,8 +547,16 @@ export default function App() {
       {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
 
       <main className="max-w-4xl mx-auto px-4 pb-24">
-        {showSettings && <div className="mb-6"><Settings /></div>}
-        {showPlanner && <div className="mb-6"><Planner /></div>}
+        {showSettings && (
+          <div className="mb-6">
+            <Settings />
+          </div>
+        )}
+        {showPlanner && (
+          <div className="mb-6">
+            <Planner />
+          </div>
+        )}
 
         <div className="flex gap-2 mb-4">
           <Tab k="hook" label="Hooks" />
@@ -541,18 +568,29 @@ export default function App() {
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Thema</label>
-            <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="z. B. Muskelaufbau" />
+            <input
+              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="z. B. Muskelaufbau"
+            />
           </div>
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Nische</label>
-            <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={niche} onChange={(e) => setNiche(e.target.value)} placeholder="z. B. fitness, beauty, coding" />
+            <input
+              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={niche}
+              onChange={(e) => setNiche(e.target.value)}
+              placeholder="z. B. fitness, beauty, coding"
+            />
           </div>
           <div>
             <label className="block text-xs uppercase tracking-wide mb-1">Ton</label>
-            <select className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
-              value={tone} onChange={(e) => setTone(e.target.value)}>
+            <select
+              className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-800"
+              value={tone}
+              onChange={(e) => setTone(e.target.value)}
+            >
               <option value="locker">locker</option>
               <option value="seriös">seriös</option>
               <option value="motiviert">motiviert</option>
@@ -561,17 +599,28 @@ export default function App() {
           </div>
         </div>
 
-        <button
-          disabled={!canGenerate || loading || limitReached}
-          onClick={generate}
-          className={
-            "px-4 py-2 rounded-xl border font-medium " +
-            (loading || !canGenerate || limitReached ? "opacity-50 cursor-not-allowed"
-              : "bg-black text-white dark:bg-white dark:text-black")
-          }
-        >
-          {limitReached ? "Limit erreicht" : loading ? "Generiere…" : "Generieren"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            disabled={!canGenerate || loading || limitReached}
+            onClick={() => doGenerate(false)}
+            className={
+              "px-4 py-2 rounded-xl border font-medium " +
+              (loading || !canGenerate || limitReached
+                ? "opacity-50 cursor-not-allowed"
+                : "bg-black text-white dark:bg-white dark:text-black")
+            }
+          >
+            {limitReached ? "Limit erreicht" : loading ? "Generiere…" : "Generieren"}
+          </button>
+          <button
+            disabled={!canGenerate || loading}
+            onClick={() => doGenerate(true)}
+            className="px-4 py-2 rounded-xl border font-medium"
+            title="Cache ignorieren (force)"
+          >
+            Force
+          </button>
+        </div>
 
         {error && (
           <div className="mt-4 p-3 rounded-lg border border-red-400 text-red-700 bg-red-50 dark:bg-transparent">
@@ -587,10 +636,17 @@ export default function App() {
               <div className="flex items-start justify-between gap-3">
                 <pre className="whitespace-pre-wrap font-sans text-sm">{v}</pre>
                 <div className="flex gap-2">
-                  <button onClick={() => navigator.clipboard.writeText(v)}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80">Kopieren</button>
-                  <button onClick={() => saveToLibrary(v)} disabled={busySaveId !== null}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80">
+                  <button
+                    onClick={() => navigator.clipboard.writeText(v)}
+                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
+                  >
+                    Kopieren
+                  </button>
+                  <button
+                    onClick={() => saveToLibrary(v)}
+                    disabled={busySaveId !== null}
+                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
+                  >
                     {busySaveId !== null ? "Speichere…" : "Speichern"}
                   </button>
                   <button
@@ -600,7 +656,11 @@ export default function App() {
                       try {
                         const uid = session.user.id;
                         const { error } = await supabase.from("generations").insert({
-                          user_id: uid, type, input: { topic, niche, tone }, output: v, favorite: true,
+                          user_id: uid,
+                          type,
+                          input: { topic, niche, tone },
+                          output: v,
+                          favorite: true,
                         });
                         if (error) throw error;
                         await loadLibrary();
@@ -634,14 +694,20 @@ export default function App() {
           <div className="grid md:grid-cols-4 gap-3 items-end">
             <div className="md:col-span-2">
               <label className="block text-xs uppercase tracking-wide mb-1">Suche (Topic/Output)</label>
-              <input className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
-                value={libSearch} onChange={(e) => setLibSearch(e.target.value)}
-                placeholder="z. B. Muskelaufbau oder 'Hook Formel'" />
+              <input
+                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={libSearch}
+                onChange={(e) => setLibSearch(e.target.value)}
+                placeholder="z. B. Muskelaufbau oder 'Hook Formel'"
+              />
             </div>
             <div>
               <label className="block text-xs uppercase tracking-wide mb-1">Typ</label>
-              <select className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
-                value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as any)}>
+              <select
+                className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-900"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as any)}
+              >
                 <option value="all">Alle</option>
                 <option value="hook">Hooks</option>
                 <option value="script">Skripte</option>
@@ -651,7 +717,9 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <input id="favOnly" type="checkbox" checked={favOnly} onChange={(e) => setFavOnly(e.target.checked)} />
-              <label htmlFor="favOnly" className="text-sm">Nur Favoriten</label>
+              <label htmlFor="favOnly" className="text-sm">
+                Nur Favoriten
+              </label>
             </div>
           </div>
         </div>
@@ -660,7 +728,9 @@ export default function App() {
         <button onClick={loadLibrary} className="mb-2 px-3 py-1 rounded-lg border text-sm" disabled={libLoading}>
           {libLoading ? "Lade…" : "Neu laden"}
         </button>
-        <div className="text-xs opacity-70 mb-3">{library.length} Ergebnisse {libLoading && "• lädt…"}</div>
+        <div className="text-xs opacity-70 mb-3">
+          {library.length} Ergebnisse {libLoading && "• lädt…"}
+        </div>
 
         <div className="grid gap-3">
           {library.map((row) => (
