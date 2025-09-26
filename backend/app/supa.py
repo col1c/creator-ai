@@ -7,6 +7,8 @@ import os
 import httpx
 from typing import Any, Dict, Optional
 from typing import List
+from datetime import datetime, timezone, timedelta
+
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
@@ -118,3 +120,38 @@ async def templates_delete(id_: int, user_id: str):
         )
         r.raise_for_status()
         return True
+    
+
+async def get_upcoming_slots(window_minutes: int = 30) -> list[dict]:
+    """
+    Liefert Planner-Slots, die in den nächsten `window_minutes` fällig sind
+    und noch nicht erinnert wurden. Enthält die verknüpfte Nutzer-E-Mail.
+    """
+    now = datetime.now(timezone.utc)
+    since = now.isoformat()
+    until = (now + timedelta(minutes=window_minutes)).isoformat()
+
+    # PostgREST-AND-Filter verwenden, um beide Zeitbedingungen zu kombinieren
+    params = {
+        "select": "id,user_id,platform,scheduled_at,note,reminder_sent,users_public(email)",
+        "reminder_sent": "is.false",
+        "and": f"(gte.scheduled_at.{since},lte.scheduled_at.{until})",
+        "order": "scheduled_at.asc",
+        "limit": 500,
+    }
+    return await _get("/rest/v1/planner_slots", params)
+
+async def mark_reminded(ids: List[int]) -> bool:
+    """Setzt reminder_sent=true für die übergebenen Slot-IDs."""
+    if not ids:
+        return True
+    ids_str = ",".join(str(i) for i in ids)
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/planner_slots",
+            headers=_headers(),
+            params={"id": f"in.({ids_str})"},
+            json={"reminder_sent": True},
+        )
+        r.raise_for_status()
+    return True
