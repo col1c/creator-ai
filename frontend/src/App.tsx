@@ -15,6 +15,9 @@ import CreditsBadge from "./components/CreditsBadge";
 import EmptyState from "./components/EmptyState";
 import LoadingCard from "./components/LoadingCard";
 
+/* NEU: Dashboard „Daily-3“ */
+import DashboardDaily3 from "./components/DashboardDaily3";
+
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path}`;
@@ -157,6 +160,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showDashboard, setShowDashboard] = useState(true); // NEU
 
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
@@ -563,6 +567,9 @@ export default function App() {
           <EngineBadge />
           <TokensBadge />
           <CreditsBadge remaining={credits.remaining} cached={isCached} />
+          <button onClick={() => setShowDashboard((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
+            {showDashboard ? "Close Dashboard" : "Dashboard"}
+          </button>
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
           </button>
@@ -591,6 +598,14 @@ export default function App() {
             <Settings />
           </div>
         )}
+
+        {/* NEU: Dashboard (Daily-3) */}
+        {showDashboard && (
+          <div className="mb-6">
+            <DashboardDaily3 />
+          </div>
+        )}
+
         {showPlanner && (
           <div className="mb-6">
             <Planner />
