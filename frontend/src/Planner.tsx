@@ -3,17 +3,12 @@ import { supabase } from "./lib/supabaseClient";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import type { DropResult } from "@hello-pangea/dnd";
 
-/** API-Basispfad (für iCal-Export) */
-const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
-const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
-const api = (path: string) => `${API_BASE}${path}`;
-
 type Platform = "tiktok" | "instagram" | "youtube" | "shorts" | "reels" | "other";
 
 type Slot = {
-  id: number;
+  id: string | number;            // ← String ODER Number (UUID-safe)
   platform: Platform;
-  scheduled_at: string; // ISO UTC
+  scheduled_at: string;           // ISO UTC
   note: string | null;
   user_id?: string;
 };
@@ -84,46 +79,13 @@ export default function Planner() {
     }
   };
 
-  const del = async (id: number) => {
+  const del = async (id: string | number) => {
     try {
-      const { error } = await supabase
-        .from("planner_slots")
-        .delete()
-        .eq("id", id);
-    if (error) throw error;
+      const { error } = await supabase.from("planner_slots").delete().eq("id", id);
+      if (error) throw error;
       setRows((prev) => prev.filter((r) => r.id !== id));
     } catch (e: any) {
       alert(e?.message || "Konnte Eintrag nicht löschen.");
-    }
-  };
-
-  /** iCal-Export (.ics herunterladen) */
-  const downloadIcs = async () => {
-    try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) {
-        alert("Bitte einloggen.");
-        return;
-      }
-      const res = await fetch(api("/api/v1/planner/ical"), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `HTTP ${res.status}`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "creatorai_planner.ics";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e: any) {
-      alert(e?.message || "Konnte iCal nicht laden.");
     }
   };
 
@@ -156,31 +118,33 @@ export default function Planner() {
     const dstCol = destination.droppableId as Platform;
     if (!srcCol || !dstCol) return;
 
-    // ID aus draggableId "slot-{id}"
-    const id = Number(draggableId.replace("slot-", ""));
-    if (!id) return;
+    // ID NICHT in Number casten (UUID-safe)
+    const rawId = draggableId.replace(/^slot-/, "");
+    const id: string | number = rawId;
+    if (!rawId) return;
 
-    // Wechsel der Plattform -> persistieren
     if (srcCol !== dstCol) {
       try {
         // Optimistisch im UI updaten
-        setRows((prev) =>
-          prev.map((r) => (r.id === id ? { ...r, platform: dstCol } : r))
-        );
+        setRows((prev) => prev.map((r) => (String(r.id) === rawId ? { ...r, platform: dstCol } : r)));
+
+        // Persistieren
         const { error } = await supabase
           .from("planner_slots")
           .update({ platform: dstCol })
           .eq("id", id);
+
         if (error) throw error;
+
+        // Server-Truth nachziehen (für volle Sicherheit)
+        await load();
       } catch (e: any) {
         alert(e?.message || "Konnte Plattform nicht ändern.");
-        // Zur Sicherheit neu laden
+        // Fallback: reload auf Server-Stand
         load();
       }
     } else {
-      // Reorder innerhalb derselben Spalte: nur lokal sortieren (kein Persist-Feld vorhanden)
-      // Wir sortieren eh nach scheduled_at; deshalb nur optische Verschiebung im UI:
-      // NOP – oder du könntest hier in Zukunft ein 'position' Feld einführen.
+      // Reorder innerhalb der Spalte: aktuell nur visuell (kein position-Feld)
     }
   };
 
@@ -254,13 +218,6 @@ export default function Planner() {
         >
           {loading ? "Lade…" : "Refresh"}
         </button>
-        {/* iCal-Export */}
-        <button
-          onClick={downloadIcs}
-          className="px-3 py-2 rounded-xl border"
-        >
-          Export .ics
-        </button>
       </div>
 
       {/* DnD-Board */}
@@ -288,8 +245,8 @@ export default function Planner() {
                     >
                       {items.map((r, idx) => (
                         <Draggable
-                          key={`slot-${r.id}`}
-                          draggableId={`slot-${r.id}`}
+                          key={`slot-${String(r.id)}`}           // ← ID als String
+                          draggableId={`slot-${String(r.id)}`}    // ← ID als String
                           index={idx}
                         >
                           {(p, snap) => (
@@ -311,7 +268,7 @@ export default function Planner() {
                               )}
                               <div className="mt-2 flex items-center justify-between">
                                 <span className="text-xs opacity-60">
-                                  ID #{r.id}
+                                  ID #{String(r.id)}
                                 </span>
                                 <button
                                   onClick={() => del(r.id)}
