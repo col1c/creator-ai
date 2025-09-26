@@ -6,6 +6,12 @@ import Planner from "./Planner";
 import Landing from "./Landing";
 import Onboarding from "./Onboarding";
 
+/* NEU: UI-Polish Components */
+import CopyButton from "./components/CopyButton";
+import CreditsBadge from "./components/CreditsBadge";
+import EmptyState from "./components/EmptyState";
+import LoadingCard from "./components/LoadingCard";
+
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path}`;
@@ -412,7 +418,8 @@ export default function App() {
         if (error) throw error;
         await loadLibrary();
         alert("Gespeichert ✅");
-        await supabase.from("usage_log").insert({ event: "save", meta: { type } });
+        // RLS-konform: user_id mitsenden
+        await supabase.from("usage_log").insert({ user_id: uid, event: "save", meta: { type } });
       } catch (e: any) {
         alert(e?.message || "Speichern fehlgeschlagen");
       } finally {
@@ -454,16 +461,10 @@ export default function App() {
     </button>
   );
 
-  const CreditBadge = () => (
-    <span className="px-2 py-1 rounded-lg border text-xs">
-      Credits: {credits.used}/{credits.limit} • Rest: {credits.remaining}
-    </span>
-  );
-
   const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
-  const CacheBadge = () =>
-    isCached ? <span className="px-2 py-1 rounded-lg border text-xs">Cache</span> : null;
-  const TokensBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>;
+  const TokensBadge = () => (
+    <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>
+  );
 
   // ---- UI ----
   if (!session) {
@@ -524,8 +525,9 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           <EngineBadge />
-          <CacheBadge />
           <TokensBadge />
+          {/* NEU: Credits + Cache Badge zusammen */}
+          <CreditsBadge remaining={credits.remaining} cached={isCached} />
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
           </button>
@@ -537,7 +539,6 @@ export default function App() {
               Onboarding
             </button>
           )}
-          <CreditBadge />
           <button onClick={logout} className="px-3 py-1 rounded-lg border text-sm">
             Logout
           </button>
@@ -622,7 +623,13 @@ export default function App() {
           </button>
         </div>
 
-        {error && (
+        {loading && (
+          <div className="mt-4">
+            <LoadingCard />
+          </div>
+        )}
+
+        {error && !loading && (
           <div className="mt-4 p-3 rounded-lg border border-red-400 text-red-700 bg-red-50 dark:bg-transparent">
             Fehler: {error}
             {netHint && <pre className="mt-2 whitespace-pre-wrap text-xs opacity-80">{netHint}</pre>}
@@ -630,64 +637,62 @@ export default function App() {
         )}
 
         {/* Ergebnisse */}
-        <div className="mt-6 grid gap-3">
-          {variants.map((v, i) => (
-            <div key={i} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
-              <div className="flex items-start justify-between gap-3">
-                <pre className="whitespace-pre-wrap font-sans text-sm">{v}</pre>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => navigator.clipboard.writeText(v)}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
-                  >
-                    Kopieren
-                  </button>
-                  <button
-                    onClick={() => saveToLibrary(v)}
-                    disabled={busySaveId !== null}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
-                  >
-                    {busySaveId !== null ? "Speichere…" : "Speichern"}
-                  </button>
-                  <button
-                    onClick={async () => {
-                      if (!session) return alert("Bitte einloggen.");
-                      setBusySaveId(1);
-                      try {
-                        const uid = session.user.id;
-                        const { error } = await supabase.from("generations").insert({
-                          user_id: uid,
-                          type,
-                          input: { topic, niche, tone },
-                          output: v,
-                          favorite: true,
-                        });
-                        if (error) throw error;
-                        await loadLibrary();
-                        alert("Als Favorit gespeichert ✅");
-                        await supabase.from("usage_log").insert({ event: "save", meta: { type, favorite: true } });
-                      } catch (e: any) {
-                        alert(e?.message || "Speichern fehlgeschlagen");
-                      } finally {
-                        setBusySaveId(null);
-                      }
-                    }}
-                    disabled={busySaveId !== null}
-                    className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
-                    title="Speichern & als Favorit markieren"
-                  >
-                    {busySaveId !== null ? "Speichere…" : "Speichern ★"}
-                  </button>
+        {!loading && variants.length === 0 && !error && (
+          <div className="mt-6">
+            <EmptyState title="Noch nichts generiert" hint="Wähle oben Typ & fülle das Formular aus." />
+          </div>
+        )}
+
+        {!loading && variants.length > 0 && (
+          <div className="mt-6 grid gap-3">
+            {variants.map((v, i) => (
+              <div key={i} className="p-3 rounded-xl border bg-white dark:bg-neutral-800">
+                <div className="flex items-start justify-between gap-3">
+                  <pre className="whitespace-pre-wrap font-sans text-sm">{v}</pre>
+                  <div className="flex gap-2">
+                    <CopyButton text={v} />
+                    <button
+                      onClick={() => saveToLibrary(v)}
+                      disabled={busySaveId !== null}
+                      className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
+                    >
+                      {busySaveId !== null ? "Speichere…" : "Speichern"}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!session) return alert("Bitte einloggen.");
+                        setBusySaveId(1);
+                        try {
+                          const uid = session.user.id;
+                          const { error } = await supabase.from("generations").insert({
+                            user_id: uid,
+                            type,
+                            input: { topic, niche, tone },
+                            output: v,
+                            favorite: true,
+                          });
+                          if (error) throw error;
+                          await loadLibrary();
+                          alert("Als Favorit gespeichert ✅");
+                          await supabase.from("usage_log").insert({ user_id: uid, event: "save", meta: { type, favorite: true } });
+                        } catch (e: any) {
+                          alert(e?.message || "Speichern fehlgeschlagen");
+                        } finally {
+                          setBusySaveId(null);
+                        }
+                      }}
+                      disabled={busySaveId !== null}
+                      className="shrink-0 px-3 py-1 rounded-lg border text-sm hover:opacity-80"
+                      title="Speichern & als Favorit markieren"
+                    >
+                      {busySaveId !== null ? "Speichere…" : "Speichern ★"}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-          {!loading && variants.length === 0 && (
-            <div className="p-4 rounded-xl border text-sm opacity-70">
-              Noch nichts generiert. Wähle oben Typ & fülle das Formular aus.
-            </div>
-          )}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* Library */}
         <div className="mt-10 mb-3 p-3 rounded-xl border bg-white dark:bg-neutral-800">

@@ -1,110 +1,18 @@
-import os, httpx
-from datetime import datetime, timezone, timedelta
-from .config import settings
+# app/supa.py
+# Zweck: Einheitlicher, rein async Supabase-Client (REST) + Helpers.
+# Warum: Vermeidet doppelte sync/async-Funktionen und Blocking im Event-Loop.
 
-
-SUPABASE_URL = settings.SUPABASE_URL
-SERVICE_ROLE = settings.SUPABASE_SERVICE_ROLE
-ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # optional
-
-
-def get_upcoming_slots(hours_ahead: int = 26) -> list[dict]:
-    start = datetime.now(timezone.utc)
-    end = start + timedelta(hours=hours_ahead)
-    url = (
-        f"{SUPABASE_URL}/rest/v1/planner_slots"
-        f"?reminder_sent=is.false"
-        f"&scheduled_at=gte.{start.isoformat()}"
-        f"&scheduled_at=lt.{end.isoformat()}"
-        # Embed E-Mail aus users_public
-        f"&select=id,user_id,platform,scheduled_at,note,users_public(email)"
-        f"&order=scheduled_at.asc"
-    )
-    with httpx.Client(timeout=15.0) as c:
-        r = c.get(url, headers=_admin_headers())
-        r.raise_for_status()
-        return r.json()  # [{..., "users_public": {"email": "..."}}, ...]
-
-def mark_reminded(slot_id: int):
-    url = f"{SUPABASE_URL}/rest/v1/planner_slots?id=eq.{slot_id}"
-    with httpx.Client(timeout=10.0) as c:
-        r = c.patch(url, headers=_admin_headers(), json={"reminder_sent": True})
-        r.raise_for_status()
-
-def _admin_headers():
-    if not SUPABASE_URL or not SERVICE_ROLE:
-        raise RuntimeError("Supabase Service Role nicht gesetzt")
-    return {
-        "apikey": SERVICE_ROLE,
-        "Authorization": f"Bearer {SERVICE_ROLE}",
-        "Content-Type": "application/json",
-    }
-
-def get_user_from_token(access_token: str) -> dict | None:
-    """
-    Liest den User aus Supabase Auth. Wichtig: 'apikey' MUSS gesetzt sein
-    (anon ODER service role), sonst kommt 401/403 -> user=None.
-    """
-    if not access_token or not SUPABASE_URL:
-        return None
-    url = f"{SUPABASE_URL}/auth/v1/user"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "apikey": ANON_KEY or SERVICE_ROLE or "",  # <— HIER der entscheidende Header
-    }
-    try:
-        with httpx.Client(timeout=10.0) as c:
-            r = c.get(url, headers=headers)
-            if r.status_code == 200:
-                return r.json()
-            # Optionales Debug-Logging (kurz halten)
-            # print("auth user fail", r.status_code, r.text[:200])
-    except Exception:
-        pass
-    return None
-
-def month_start_utc(now: datetime | None = None) -> str:
-    if not now: now = datetime.now(timezone.utc)
-    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    return start.isoformat()
-
-def get_profile(user_id: str) -> dict:
-    url = f"{SUPABASE_URL}/rest/v1/users_public?select=monthly_credit_limit&user_id=eq.{user_id}"
-    with httpx.Client(timeout=12.0) as c:
-        r = c.get(url, headers=_admin_headers())
-        r.raise_for_status()
-        rows = r.json()
-        if rows: return rows[0]
-    return {"monthly_credit_limit": 50}
-
-def count_generates_this_month(user_id: str) -> int:
-    start = month_start_utc()
-    url = (f"{SUPABASE_URL}/rest/v1/usage_log"
-           f"?user_id=eq.{user_id}&event=eq.generate&created_at=gte.{start}&select=id")
-    with httpx.Client(timeout=12.0) as c:
-        r = c.get(url, headers=_admin_headers())
-        r.raise_for_status()
-        return len(r.json())
-
-def log_usage(user_id: str, event: str, meta: dict | None = None):
-    url = f"{SUPABASE_URL}/rest/v1/usage_log"
-    payload = {"user_id": user_id, "event": event, "meta": meta or {}}
-    with httpx.Client(timeout=12.0) as c:
-        r = c.post(url, headers=_admin_headers(), json=payload)
-        r.raise_for_status()
-
-def get_profile_full(user_id: str) -> dict:
-    url = f"{SUPABASE_URL}/rest/v1/users_public?select=handle,niche,target,brand_voice,monthly_credit_limit&user_id=eq.{user_id}"
-    with httpx.Client(timeout=10.0) as c:
-        r = c.get(url, headers=_admin_headers())
-        r.raise_for_status()
-        rows = r.json()
-    return rows[0] if rows else {"brand_voice": {}, "monthly_credit_limit": 50}
+from __future__ import annotations
+import os
+import httpx
+from typing import Any, Dict, Optional
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
 
-def _headers():
+DEFAULT_TIMEOUT = httpx.Timeout(15.0, read=15.0, write=15.0, connect=10.0)
+
+def _headers() -> Dict[str, str]:
     return {
         "apikey": SERVICE_ROLE,
         "Authorization": f"Bearer {SERVICE_ROLE}",
@@ -112,33 +20,61 @@ def _headers():
         "Prefer": "return=representation",
     }
 
-async def cache_get_by_key(cache_key: str, user_id: str):
-    url = f"{SUPABASE_URL}/rest/v1/prompt_cache"
-    params = {
+async def _get(path: str, params: Optional[Dict[str, Any]] = None):
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.get(f"{SUPABASE_URL}{path}", headers=_headers(), params=params)
+        r.raise_for_status()
+        return r.json()
+
+async def _post(path: str, json: Dict[str, Any]):
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.post(f"{SUPABASE_URL}{path}", headers=_headers(), json=json)
+        r.raise_for_status()
+        return r.json() if r.text else None
+
+# ---------- Auth / User ----------
+
+async def get_user_from_token(access_token: str) -> Dict[str, Any]:
+    """Liest den Auth-User (auth.user) anhand eines Supabase-Access-Tokens."""
+    headers = {
+        "apikey": SERVICE_ROLE,
+        "Authorization": f"Bearer {access_token}",
+    }
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.get(f"{SUPABASE_URL}/auth/v1/user", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+# ---------- Usage-Log ----------
+
+async def log_usage(user_id: str, event: str, meta: Optional[Dict[str, Any]] = None) -> bool:
+    try:
+        await _post("/rest/v1/usage_log", {"user_id": user_id, "event": event, "meta": meta or {}})
+    except Exception:
+        # Logging darf nie Business-Flow killen
+        return False
+    return True
+
+# ---------- Prompt-Cache ----------
+
+async def cache_get_by_key(cache_key: str, user_id: str) -> Optional[Dict[str, Any]]:
+    items = await _get("/rest/v1/prompt_cache", {
         "cache_key": f"eq.{cache_key}",
         "user_id": f"eq.{user_id}",
-        "limit": 1
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url, headers=_headers(), params=params)
-        r.raise_for_status()
-        items = r.json()
-        return items[0] if items else None
+        "limit": 1,
+    })
+    return items[0] if items else None
 
-async def cache_insert(entry: dict):
-    url = f"{SUPABASE_URL}/rest/v1/prompt_cache"
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url, headers=_headers(), json=entry)
-        r.raise_for_status()
-        return r.json()[0] if r.text else None
+async def cache_insert(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return await _post("/rest/v1/prompt_cache", entry)
 
-async def log_usage(user_id: str, event: str, meta: dict | None = None):
-    url = f"{SUPABASE_URL}/rest/v1/usage_log"
-    payload = {"user_id": user_id, "event": event, "meta": meta or {}}
-    async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            await client.post(url, headers=_headers(), json=payload)
-        except Exception:
-            # Logging darf nie den Request sprengen
-            pass
-    return True
+# ---------- Users Public ----------
+
+async def upsert_users_public(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Nutzt 'user_id' als PK (insert conflict handled RLS-seitig)
+    return await _post("/rest/v1/users_public", row)
+
+# ---------- Generations (Convenience) ----------
+
+async def insert_generation(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return await _post("/rest/v1/generations", row)
