@@ -80,7 +80,7 @@ function normalizeVariants(v: unknown): string[] {
   try {
     // 1) Array
     if (Array.isArray(v)) {
-      const flat = v.flat();
+      const flat = (v as any[]).flat();
       const list: string[] = [];
       for (const item of flat) {
         if (typeof item === "string") list.push(item);
@@ -156,7 +156,7 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
-  const [showTemplates, setShowTemplates] = useState(false); // NEU
+  const [showTemplates, setShowTemplates] = useState(false);
 
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
@@ -279,7 +279,7 @@ export default function App() {
     fetchCredits();
   }, [fetchCredits]);
 
-  // Prefill aus Templates.Apply (localStorage)
+  // Prefill aus Templates.Apply (localStorage Fallback)
   useEffect(() => {
     try {
       const raw = localStorage.getItem("creatorai_prefill");
@@ -421,6 +421,25 @@ export default function App() {
     [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON, loading]
   );
 
+  // Apply aus Templates (direkter Callback → sofortige Befüllung + optional Auto-Generate)
+  const onApplyTemplate = useCallback(
+    (prefill: { type: "hook" | "script" | "caption"; topic: string; niche: string; tone: string }) => {
+      setType(prefill.type as GenType);
+      setTopic(prefill.topic || "");
+      setNiche(prefill.niche || "");
+      setTone(prefill.tone || "");
+      setShowTemplates(false);
+      // sanft nach oben & direkt generieren, falls Topic gesetzt
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        if ((prefill.topic || "").trim().length > 1) {
+          doGenerate(false);
+        }
+      }, 50);
+    },
+    [doGenerate]
+  );
+
   // Save
   const saveToLibrary = useCallback(
     async (variant: string) => {
@@ -497,11 +516,6 @@ export default function App() {
           <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • API: {API_BASE || "—"}
           </p>
-          {!warm && (
-            <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
-              Erneut prüfen
-            </button>
-          )}
         </header>
         <main className="max-w-4xl mx-auto px-4 pb-24">
           <Landing
@@ -548,7 +562,6 @@ export default function App() {
         <div className="flex items-center gap-2">
           <EngineBadge />
           <TokensBadge />
-          {/* NEU: Credits + Cache Badge zusammen */}
           <CreditsBadge remaining={credits.remaining} cached={isCached} />
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
@@ -585,7 +598,7 @@ export default function App() {
         )}
         {showTemplates && (
           <div className="mb-6">
-            <Templates />
+            <Templates onApply={onApplyTemplate} />
           </div>
         )}
 
@@ -704,7 +717,9 @@ export default function App() {
                           if (error) throw error;
                           await loadLibrary();
                           alert("Als Favorit gespeichert ✅");
-                          await supabase.from("usage_log").insert({ user_id: uid, event: "save", meta: { type, favorite: true } });
+                          await supabase
+                            .from("usage_log")
+                            .insert({ user_id: uid, event: "save", meta: { type, favorite: true } });
                         } catch (e: any) {
                           alert(e?.message || "Speichern fehlgeschlagen");
                         } finally {

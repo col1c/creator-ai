@@ -1,13 +1,18 @@
-// NEU: src/Templates.tsx
+// src/Templates.tsx
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 
 type TType = "hook" | "script" | "caption";
 type TRow = { id: number; name: string; type: TType; prompt: any; created_at: string };
 
+type Props = {
+  // wird von App.tsx übergeben, um sofort Felder zu setzen
+  onApply?: (prefill: { type: TType; topic: string; niche: string; tone: string; raw?: any; name?: string }) => void;
+};
+
 const TYPES: TType[] = ["hook", "script", "caption"];
 
-export default function Templates() {
+export default function Templates({ onApply }: Props) {
   const [rows, setRows] = useState<TRow[]>([]);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | TType>("all");
@@ -28,7 +33,11 @@ export default function Templates() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      let q = supabase.from("templates").select("id,name,type,prompt,created_at").order("created_at", { ascending: false }).limit(100);
+      let q = supabase
+        .from("templates")
+        .select("id,name,type,prompt,created_at")
+        .order("created_at", { ascending: false })
+        .limit(100);
       if (typeFilter !== "all") q = q.eq("type", typeFilter);
       const s = search.trim();
       if (s) q = q.ilike("name", `%${s}%`);
@@ -92,27 +101,31 @@ export default function Templates() {
   };
 
   const apply = (r: TRow) => {
-    // Prefill für Generate: localStorage -> App.tsx liest es und füllt Felder
     const p = r.prompt || {};
     const prefill = {
       type: r.type,
-      topic: String(p.topic || ""),
-      niche: String(p.niche || ""),
-      tone: String(p.tone || ""),
+      topic: String(p.topic ?? ""),
+      niche: String(p.niche ?? ""),
+      tone: String(p.tone ?? ""),
+      raw: p,
+      name: r.name,
     };
-    localStorage.setItem("creatorai_prefill", JSON.stringify(prefill));
-    alert("Template angewendet. Wechsle zurück zu Generate.");
-    // optional: scroll to top
-    window.scrollTo({ top: 0, behavior: "smooth" });
+
+    if (onApply) {
+      // -> direkt an App.tsx durchreichen (Felder sofort setzen)
+      onApply(prefill);
+    } else {
+      // Fallback (sollte nicht mehr nötig sein)
+      localStorage.setItem("creatorai_prefill", JSON.stringify(prefill));
+      alert("Template angewendet. Wechsle zurück zu Generate.");
+    }
   };
 
   return (
     <div className="p-4 rounded-2xl border bg-white dark:bg-neutral-800">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">Templates</h2>
-        <button onClick={openCreate} className="px-3 py-1.5 rounded-xl border text-sm">
-          Neu
-        </button>
+        <button onClick={openCreate} className="px-3 py-1.5 rounded-xl border text-sm">Neu</button>
       </div>
 
       <div className="grid md:grid-cols-3 gap-3 mb-3">
