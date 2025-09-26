@@ -10,6 +10,8 @@ from pydantic import BaseModel, field_validator
 from . import supa
 from .ical import router as ical_router  # NEU
 
+from .analytics import router as analytics_router  # NEU
+
 from .mailer import send_mail
 from .config import settings
 from .supa import get_upcoming_slots, mark_reminded
@@ -33,6 +35,7 @@ from .ratelimit import check_allow  # Rate limit helper
 
 app = FastAPI(title="Creator AI Backend", version="0.4.0")
 app.include_router(ical_router)
+app.include_router(analytics_router)               # NE
 
 # CORS breit fürs MVP (später per ENV einschränken)
 app.add_middleware(

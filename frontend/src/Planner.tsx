@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import type { DropResult } from "@hello-pangea/dnd";
+import AnalyticsLight from "./components/AnalyticsLight";
 
-/** API-Basis (für iCal-Export – bewusst auf Alias-Rout e) */
+/** API-Basis */
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path}`;
@@ -31,6 +32,7 @@ export default function Planner() {
   const [uid, setUid] = useState<string | null>(null);
   const [rows, setRows] = useState<Slot[]>([]);
   const [loading, setLoading] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
 
   // Add-Form
   const [platform, setPlatform] = useState<Platform>("tiktok");
@@ -54,7 +56,6 @@ export default function Planner() {
       if (error) throw error;
       setRows((data as Slot[]) || []);
     } catch (e: any) {
-      console.error(e);
       alert(e?.message || "Konnte Planner nicht laden.");
     } finally {
       setLoading(false);
@@ -64,6 +65,25 @@ export default function Planner() {
   useEffect(() => {
     load();
   }, []);
+
+  // ---- USAGE LOGGING
+  const logEvent = async (event: string, meta: any = {}) => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) return; // silently ignore
+      await fetch(api("/api/v1/usage"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ event, meta }),
+      });
+    } catch {
+      // ignore
+    }
+  };
 
   const add = async () => {
     if (!uid) return alert("Bitte zuerst einloggen.");
@@ -77,27 +97,49 @@ export default function Planner() {
         note: note || null,
       });
       if (error) throw error;
+      await logEvent("save", { where: "planner", platform, scheduled_at: iso });
       setNote("");
       setDtLocal("");
       await load();
     } catch (e: any) {
-      console.error(e);
       alert(e?.message || "Eintrag konnte nicht gespeichert werden.");
     }
   };
 
   const del = async (id: string | number) => {
     try {
+      const row = rows.find(r => String(r.id) === String(id));
       const { error } = await supabase.from("planner_slots").delete().eq("id", id);
       if (error) throw error;
       setRows((prev) => prev.filter((r) => r.id !== id));
+      await logEvent("delete", { where: "planner", id, row });
     } catch (e: any) {
-      console.error(e);
       alert(e?.message || "Konnte Eintrag nicht löschen.");
     }
   };
 
-  /** iCal-Export – **nur** Alias-Route, um 405-Kollisionen zu vermeiden */
+  /** DEV-Reminder (Self) */
+  const testReminder = async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        alert("Bitte einloggen.");
+        return;
+      }
+      const res = await fetch(api("/api/v1/planner/remind/self?hours=24"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.detail || JSON.stringify(json) || `HTTP ${res.status}`);
+      alert(`Reminder ausgelöst → an: ${json.to || "?"}, Slots: ${json.count}`);
+    } catch (e: any) {
+      alert(e?.message || "Reminder fehlgeschlagen.");
+    }
+  };
+
+  /** iCal-Export (Alias-Route) */
   const downloadIcs = async () => {
     try {
       const { data } = await supabase.auth.getSession();
@@ -123,8 +165,8 @@ export default function Planner() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+      await logEvent("export_ics", { where: "planner" });
     } catch (e: any) {
-      console.error(e);
       alert(e?.message || "Konnte iCal nicht laden.");
     }
   };
@@ -140,11 +182,9 @@ export default function Planner() {
       other: [],
     };
     for (const r of rows) g[r.platform]?.push(r);
-    // pro Spalte nach Zeit sortieren
     (Object.keys(g) as Platform[]).forEach((k) =>
-      g[k].sort(
-        (a, b) =>
-          new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
+      g[k].sort((a, b) =>
+        new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
       )
     );
     return g;
@@ -158,43 +198,31 @@ export default function Planner() {
     const dstCol = destination.droppableId as Platform;
     if (!srcCol || !dstCol) return;
 
-    // ID (UUID/Int) korrekt für Query
     const rawId = draggableId.replace(/^slot-/, "");
     const idForQuery: string | number = /^\d+$/.test(rawId) ? Number(rawId) : rawId;
     if (!rawId) return;
 
     if (srcCol !== dstCol) {
       try {
-        // Optimistisch im UI
         setRows((prev) =>
           prev.map((r) => (String(r.id) === rawId ? { ...r, platform: dstCol } : r))
         );
-
-        // Persistieren + Rückgabe prüfen
         const { error, data } = await supabase
           .from("planner_slots")
           .update({ platform: dstCol })
           .eq("id", idForQuery)
-          .select("id, platform");
-
+          .select("id");
         if (error) throw error;
-        if (!data || !data.length) {
-          throw new Error("Update fehlgeschlagen (RLS/Policy?)");
-        }
-
-        // Server-Stand laden
+        if (!data || !data.length) throw new Error("Update fehlgeschlagen (RLS?)");
+        await logEvent("move", { from: srcCol, to: dstCol, id: rawId });
         await load();
       } catch (e: any) {
-        console.error(e);
         alert(e?.message || "Konnte Plattform nicht ändern.");
         load();
       }
-    } else {
-      // Reorder innerhalb der Spalte: aktuell nur visuell
     }
   };
 
-  // Utils
   const localDateTime = (iso: string) =>
     new Date(iso).toLocaleString([], {
       year: "2-digit",
@@ -257,18 +285,17 @@ export default function Planner() {
         >
           Hinzufügen
         </button>
-        <button
-          onClick={load}
-          className="px-3 py-2 rounded-xl border"
-          disabled={loading}
-        >
+        <button onClick={load} className="px-3 py-2 rounded-xl border" disabled={loading}>
           {loading ? "Lade…" : "Refresh"}
         </button>
-        <button
-          onClick={downloadIcs}
-          className="px-3 py-2 rounded-xl border"
-        >
+        <button onClick={downloadIcs} className="px-3 py-2 rounded-xl border">
           Export .ics
+        </button>
+        <button onClick={testReminder} className="px-3 py-2 rounded-xl border">
+          Test-Reminder
+        </button>
+        <button onClick={() => setShowAnalytics(true)} className="px-3 py-2 rounded-xl border">
+          Analytics
         </button>
       </div>
 
@@ -290,9 +317,7 @@ export default function Planner() {
                       ref={provided.innerRef}
                       {...provided.droppableProps}
                       className={`min-h-[120px] rounded-xl p-2 transition ${
-                        snapshot.isDraggingOver
-                          ? "bg-neutral-100 dark:bg-neutral-800"
-                          : "bg-transparent"
+                        snapshot.isDraggingOver ? "bg-neutral-100 dark:bg-neutral-800" : "bg-transparent"
                       }`}
                     >
                       {items.map((r, idx) => (
@@ -313,15 +338,9 @@ export default function Planner() {
                               <div className="text-sm font-medium">
                                 {localDateTime(r.scheduled_at)}
                               </div>
-                              {r.note && (
-                                <div className="text-sm opacity-80 mt-1">
-                                  {r.note}
-                                </div>
-                              )}
+                              {r.note && <div className="text-sm opacity-80 mt-1">{r.note}</div>}
                               <div className="mt-2 flex items-center justify-between">
-                                <span className="text-xs opacity-60">
-                                  ID #{String(r.id)}
-                                </span>
+                                <span className="text-xs opacity-60">ID #{String(r.id)}</span>
                                 <button
                                   onClick={() => del(r.id)}
                                   className="text-xs px-2 py-1 rounded-lg border hover:bg-neutral-50 dark:hover:bg-neutral-600"
@@ -336,9 +355,7 @@ export default function Planner() {
                       ))}
                       {provided.placeholder}
                       {!items.length && (
-                        <div className="text-xs opacity-60 py-6 text-center">
-                          Ziehe Karten hierher
-                        </div>
+                        <div className="text-xs opacity-60 py-6 text-center">Ziehe Karten hierher</div>
                       )}
                     </div>
                   )}
@@ -349,16 +366,12 @@ export default function Planner() {
         </div>
       </DragDropContext>
 
-      {!rows.length && !loading && (
-        <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">
-          Noch keine Einträge.
-        </div>
+      {(!rows.length && !loading) && (
+        <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">Noch keine Einträge.</div>
       )}
-      {loading && (
-        <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">
-          Lade Planner…
-        </div>
-      )}
+      {loading && <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">Lade Planner…</div>}
+
+      {showAnalytics && <AnalyticsLight onClose={() => setShowAnalytics(false)} />}
     </div>
   );
 }
