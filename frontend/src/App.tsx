@@ -6,6 +6,9 @@ import Planner from "./Planner";
 import Landing from "./Landing";
 import Onboarding from "./Onboarding";
 
+/* NEU: Templates-Seite (CRUD + Apply) */
+import Templates from "./Templates";
+
 /* NEU: UI-Polish Components */
 import CopyButton from "./components/CopyButton";
 import CreditsBadge from "./components/CreditsBadge";
@@ -153,6 +156,7 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false); // NEU
 
   const [engine, setEngine] = useState<string>("—");
   const [tokenInfo, setTokenInfo] = useState<{ prompt?: number; completion?: number; total?: number }>({});
@@ -274,6 +278,24 @@ export default function App() {
   useEffect(() => {
     fetchCredits();
   }, [fetchCredits]);
+
+  // Prefill aus Templates.Apply (localStorage)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("creatorai_prefill");
+      if (!raw) return;
+      const p = JSON.parse(raw);
+      if (p.type) setType(p.type);
+      if (typeof p.topic === "string") setTopic(p.topic);
+      if (typeof p.niche === "string") setNiche(p.niche);
+      if (typeof p.tone === "string") setTone(p.tone);
+    } catch {}
+    finally {
+      localStorage.removeItem("creatorai_prefill");
+      setShowTemplates(false);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, []);
 
   // Library
   const loadLibrary = useCallback(async () => {
@@ -531,6 +553,9 @@ export default function App() {
           <button onClick={() => setShowPlanner((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showPlanner ? "Close Planner" : "Planner"}
           </button>
+          <button onClick={() => setShowTemplates((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
+            {showTemplates ? "Close Templates" : "Templates"}
+          </button>
           <button onClick={() => setShowSettings((s) => !s)} className="px-3 py-1 rounded-lg border text-sm">
             {showSettings ? "Close Settings" : "Settings"}
           </button>
@@ -556,6 +581,11 @@ export default function App() {
         {showPlanner && (
           <div className="mb-6">
             <Planner />
+          </div>
+        )}
+        {showTemplates && (
+          <div className="mb-6">
+            <Templates />
           </div>
         )}
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import httpx
 from typing import Any, Dict, Optional
+from typing import List
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
@@ -78,3 +79,42 @@ async def upsert_users_public(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 async def insert_generation(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return await _post("/rest/v1/generations", row)
+
+async def templates_list(user_id: str, search: str | None = None, typ: str | None = None, limit: int = 100):
+    params: dict = {
+        "select": "id,name,type,prompt,created_at",
+        "user_id": f"eq.{user_id}",
+        "order": "created_at.desc",
+        "limit": limit,
+    }
+    if typ in ("hook","script","caption"):
+        params["type"] = f"eq.{typ}"
+    if search:
+        params["name"] = f"ilike.%{search}%"
+    return await _get("/rest/v1/templates", params)
+
+async def templates_create(user_id: str, name: str, typ: str, prompt: dict):
+    payload = {"user_id": user_id, "name": name, "type": typ, "prompt": prompt}
+    return await _post("/rest/v1/templates", payload)
+
+async def templates_update(id_: int, user_id: str, patch: dict):
+    # Patch nur auf eigene Zeile anwenden
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/templates",
+            headers=_headers(),
+            params={"id": f"eq.{id_}", "user_id": f"eq.{user_id}"},
+            json=patch,
+        )
+        r.raise_for_status()
+        return r.json() if r.text else None
+
+async def templates_delete(id_: int, user_id: str):
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.delete(
+            f"{SUPABASE_URL}/rest/v1/templates",
+            headers=_headers(),
+            params={"id": f"eq.{id_}", "user_id": f"eq.{user_id}"},
+        )
+        r.raise_for_status()
+        return True

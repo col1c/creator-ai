@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 import os
 
-from fastapi import FastAPI, HTTPException, Header, Response, Query, Request
+from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
+from . import supa
 
 from .mailer import send_mail
 from .config import settings
@@ -369,3 +370,67 @@ def planner_remind(request: Request, x_cron_secret: str | None = Header(default=
             pass
 
     return {"ok": True, "sent": int(sent), "checked": int(len(slots))}
+
+router = APIRouter()  # falls schon vorhanden, diese Endpunkte an den bestehenden router anhängen
+
+async def _uid_from_request(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth.split(" ", 1)[1]
+    user = await supa.get_user_from_token(token)
+    uid = user.get("id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return uid
+
+@router.get("/api/v1/templates")
+async def list_templates(
+    request: Request,
+    search: Optional[str] = Query(None),
+    typ: Optional[str] = Query(None, regex="^(hook|script|caption)$"),
+    limit: int = Query(100, ge=1, le=200),
+):
+    uid = await _uid_from_request(request)
+    items = await supa.templates_list(uid, search=search, typ=typ, limit=limit)
+    return {"items": items}
+
+@router.post("/api/v1/templates")
+async def create_template(request: Request):
+    uid = await _uid_from_request(request)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    typ  = body.get("type")
+    prompt = body.get("prompt") or {}
+    if typ not in ("hook","script","caption"):
+        raise HTTPException(400, "type must be one of hook|script|caption")
+    if not name:
+        raise HTTPException(400, "name required")
+    try:
+        row = await supa.templates_create(uid, name=name, typ=typ, prompt=prompt)
+        return {"item": row[0] if isinstance(row, list) and row else row}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@router.patch("/api/v1/templates/{id}")
+async def update_template(id: int = Path(...), request: Request = None):
+    uid = await _uid_from_request(request)
+    patch = await request.json()
+    # nur erlaubte Felder
+    patch = {k: v for k, v in patch.items() if k in ("name","type","prompt")}
+    if "type" in patch and patch["type"] not in ("hook","script","caption"):
+        raise HTTPException(400, "invalid type")
+    try:
+        row = await supa.templates_update(id, uid, patch)
+        return {"item": row[0] if isinstance(row, list) and row else row}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@router.delete("/api/v1/templates/{id}")
+async def delete_template(id: int = Path(...), request: Request = None):
+    uid = await _uid_from_request(request)
+    try:
+        await supa.templates_delete(id, uid)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(400, str(e))
