@@ -155,3 +155,31 @@ async def mark_reminded(ids: List[int]) -> bool:
         )
         r.raise_for_status()
     return True
+
+# --- Users Public: Read/Update ---------------------------------------------
+
+async def get_profile(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Holt das users_public-Profil zur gegebenen auth.users.id.
+    """
+    items = await _get("/rest/v1/users_public", {
+        "user_id": f"eq.{user_id}",
+        "limit": 1,
+        "select": "user_id,handle,niche,target,email,brand_voice,monthly_credit_limit,onboarding_done,created_at",
+    })
+    return items[0] if items else None
+
+async def update_profile(user_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Optionaler Helper: Patcht das Profil des Nutzers (nur eigene Zeile).
+    Praktisch für Settings/Onboarding-Endpunkte.
+    """
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/users_public",
+            headers=_headers(),
+            params={"user_id": f"eq.{user_id}", "limit": 1},
+            json=patch,
+        )
+        r.raise_for_status()
+        return r.json()[0] if r.text else None
