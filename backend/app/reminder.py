@@ -17,22 +17,17 @@ async def _uid_and_email_from_request(request: Request) -> tuple[str, str]:
         raise HTTPException(401, "missing bearer token")
     user_info = await supa.get_user_from_token(token)
     uid = (user_info.get("user") or {}).get("id") or user_info.get("id")
-    email = (user_info.get("user") or {}).get("email") or user_info.get("email")
+    email = (user_info.get("user") or {}).get("email") or user_info.get("email") or ""
     if not uid:
         raise HTTPException(401, "invalid token")
-    if not email:
-        # optional fallback: Profil aus DB ziehen, wenn du user_emails in Profiles spiegelst
-        email = ""
     return uid, email
 
 def _fmt_local(dt: datetime) -> str:
-    # Anzeige in UTC, Clients zeigen lokal an – für Mail reicht ISO
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 async def _load_upcoming_slots(uid: str, hours: int) -> List[Dict[str, Any]]:
     now = datetime.now(timezone.utc)
     until = now + timedelta(hours=hours)
-    # Hole Slots des Users (sortiert), filter lokal auf Zeitraum
     items = await supa._get(
         "/rest/v1/planner_slots",
         params={
@@ -59,10 +54,8 @@ async def _send_via_mailgun(to_email: str, subject: str, text: str) -> Dict[str,
     sender = os.getenv("MAILGUN_SENDER", f"CreatorAI <mailgun@{domain or 'example.com'}>")
 
     if not (api_key and domain):
-        # Dev-Fallback: kein Mailgun → "fake" Senden
         return {"status": "noop", "reason": "missing_mailgun_env"}
 
-    # httpx optional – import hier, damit es kein Global-Import ist
     try:
         import httpx
     except Exception:
@@ -76,28 +69,17 @@ async def _send_via_mailgun(to_email: str, subject: str, text: str) -> Dict[str,
         r = await client.post(url, auth=auth, data=data)
         return {"status": "ok" if r.status_code < 300 else "error", "code": r.status_code, "body": r.text}
 
-# --- Routes ---------------------------------------------------------------
+# --- Core ------------------------------------------------------------------
 
-@router.post("/api/v1/planner/remind/self")
-async def planner_remind_self(
-    request: Request,
-    hours: int = Query(24, ge=1, le=168)  # bis 7 Tage
-):
-    """
-    DEV-freundlicher Trigger:
-    - Kein X-Cron-Secret nötig
-    - Sendet Reminder nur für den eingeloggten User
-    - In PROD kannst du per ENV blocken, wenn gewünscht
-    """
+async def _remind_core(request: Request, hours: int) -> Dict[str, Any]:
     env = os.getenv("ENV", "dev")
-    # Wenn du in PROD blocken willst, ent-kommentieren:
+    # In prod blocken? -> auskommentiert lassen, falls du es brauchst:
     # if env == "prod":
     #     raise HTTPException(403, "Manual remind not allowed in production")
 
     uid, email = await _uid_and_email_from_request(request)
     slots = await _load_upcoming_slots(uid, hours)
 
-    # Mail-Body
     lines = [f"Deine geplanten Posts (nächste {hours}h):", ""]
     if not slots:
         lines.append("Keine Einträge im Zeitraum.")
@@ -106,13 +88,12 @@ async def planner_remind_self(
             platform = (it.get("platform") or "post").title()
             note = it.get("note") or ""
             dt = it["_dt"]
-            lines.append(f"• {platform} – { _fmt_local(dt) }  {('— ' + note) if note else ''}")
-    body = "\n".join(lines)
+            lines.append(f"• {platform} – {_fmt_local(dt)}  {('— ' + note) if note else ''}")
 
     result = await _send_via_mailgun(
         to_email=email or os.getenv("DEV_FALLBACK_EMAIL", ""),
         subject="CreatorAI Planner – Erinnerung",
-        text=body,
+        text="\n".join(lines),
     )
 
     return {
@@ -121,3 +102,20 @@ async def planner_remind_self(
         "count": len(slots),
         "mail": result,
     }
+
+# --- Routes (POST + Alias + GET-Fallback) ---------------------------------
+
+# Ursprünglicher DEV-Path unter /planner/*
+@router.post("/api/v1/planner/remind/self")
+async def planner_remind_self_post(request: Request, hours: int = Query(24, ge=1, le=168)):
+    return await _remind_core(request, hours)
+
+# Alias OHNE /planner, um Kollisionen zu vermeiden
+@router.post("/api/v1/remind/self")
+async def remind_self_post(request: Request, hours: int = Query(24, ge=1, le=168)):
+    return await _remind_core(request, hours)
+
+# GET-Fallback, falls Proxy/Rules POST blocken
+@router.get("/api/v1/remind/self")
+async def remind_self_get(request: Request, hours: int = Query(24, ge=1, le=168)):
+    return await _remind_core(request, hours)
