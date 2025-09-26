@@ -1,13 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
+import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
+import type { DropResult } from "@hello-pangea/dnd";
+
+/** API-Basispfad (für iCal-Export) */
+const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
+const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
+const api = (path: string) => `${API_BASE}${path}`;
 
 type Platform = "tiktok" | "instagram" | "youtube" | "shorts" | "reels" | "other";
 
 type Slot = {
   id: number;
   platform: Platform;
-  scheduled_at: string; // ISO (UTC)
+  scheduled_at: string; // ISO UTC
   note: string | null;
+  user_id?: string;
 };
 
 const PLATFORMS: { value: Platform; label: string }[] = [
@@ -16,20 +24,24 @@ const PLATFORMS: { value: Platform; label: string }[] = [
   { value: "youtube", label: "YouTube" },
   { value: "shorts", label: "YouTube Shorts" },
   { value: "reels", label: "Instagram Reels" },
-  { value: "other", label: "Other" },
+  { value: "other", label: "Andere" },
 ];
 
 export default function Planner() {
-  const [rows, setRows] = useState<Slot[]>([]);
-  const [platform, setPlatform] = useState<Platform>("tiktok");
-  const [dtLocal, setDtLocal] = useState<string>(""); // yyyy-MM-ddTHH:mm (local)
-  const [note, setNote] = useState("");
   const [uid, setUid] = useState<string | null>(null);
+  const [rows, setRows] = useState<Slot[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // get current user id for RLS inserts
+  // Add-Form
+  const [platform, setPlatform] = useState<Platform>("tiktok");
+  const [dtLocal, setDtLocal] = useState<string>("");
+  const [note, setNote] = useState<string>("");
+
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUid(data.user?.id ?? null));
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      setUid(data.user?.id ?? null);
+    })();
   }, []);
 
   const load = async () => {
@@ -37,13 +49,12 @@ export default function Planner() {
     try {
       const { data, error } = await supabase
         .from("planner_slots")
-        .select("id,platform,scheduled_at,note")
-        .order("scheduled_at", { ascending: true })
-        .limit(100);
+        .select("*")
+        .order("scheduled_at", { ascending: true });
       if (error) throw error;
-      setRows((data as any) || []);
+      setRows((data as Slot[]) || []);
     } catch (e: any) {
-      alert(e?.message || "Planner konnte nicht geladen werden.");
+      alert(e?.message || "Konnte Planner nicht laden.");
     } finally {
       setLoading(false);
     }
@@ -54,12 +65,12 @@ export default function Planner() {
   }, []);
 
   const add = async () => {
-    if (!uid) return alert("Bitte einloggen.");
+    if (!uid) return alert("Bitte zuerst einloggen.");
     if (!dtLocal) return alert("Bitte Datum/Uhrzeit wählen.");
-    const iso = new Date(dtLocal).toISOString(); // speichert UTC
     try {
+      const iso = new Date(dtLocal).toISOString(); // wird als UTC gespeichert
       const { error } = await supabase.from("planner_slots").insert({
-        user_id: uid, // wichtig für RLS: auth.uid() = user_id
+        user_id: uid,
         platform,
         scheduled_at: iso,
         note: note || null,
@@ -75,19 +86,120 @@ export default function Planner() {
 
   const del = async (id: number) => {
     try {
-      const { error } = await supabase.from("planner_slots").delete().eq("id", id);
-      if (error) throw error;
-      await load();
+      const { error } = await supabase
+        .from("planner_slots")
+        .delete()
+        .eq("id", id);
+    if (error) throw error;
+      setRows((prev) => prev.filter((r) => r.id !== id));
     } catch (e: any) {
-      alert(e?.message || "Löschen fehlgeschlagen.");
+      alert(e?.message || "Konnte Eintrag nicht löschen.");
     }
   };
 
-  return (
-    <div className="p-4 rounded-2xl border bg-white dark:bg-neutral-800">
-      <h2 className="text-lg font-semibold mb-3">Planner</h2>
+  /** iCal-Export (.ics herunterladen) */
+  const downloadIcs = async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        alert("Bitte einloggen.");
+        return;
+      }
+      const res = await fetch(api("/api/v1/planner/ical"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "creatorai_planner.ics";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(e?.message || "Konnte iCal nicht laden.");
+    }
+  };
 
-      <div className="grid md:grid-cols-3 gap-3 mb-3">
+  // === DnD-Logik ===
+  const grouped = useMemo(() => {
+    const g: Record<Platform, Slot[]> = {
+      tiktok: [],
+      instagram: [],
+      youtube: [],
+      shorts: [],
+      reels: [],
+      other: [],
+    };
+    for (const r of rows) g[r.platform]?.push(r);
+    // pro Spalte nach Zeit sortieren
+    (Object.keys(g) as Platform[]).forEach((k) =>
+      g[k].sort(
+        (a, b) =>
+          new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
+      )
+    );
+    return g;
+  }, [rows]);
+
+  const onDragEnd = async (result: DropResult) => {
+    const { source, destination, draggableId } = result;
+    if (!destination) return;
+
+    const srcCol = source.droppableId as Platform;
+    const dstCol = destination.droppableId as Platform;
+    if (!srcCol || !dstCol) return;
+
+    // ID aus draggableId "slot-{id}"
+    const id = Number(draggableId.replace("slot-", ""));
+    if (!id) return;
+
+    // Wechsel der Plattform -> persistieren
+    if (srcCol !== dstCol) {
+      try {
+        // Optimistisch im UI updaten
+        setRows((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, platform: dstCol } : r))
+        );
+        const { error } = await supabase
+          .from("planner_slots")
+          .update({ platform: dstCol })
+          .eq("id", id);
+        if (error) throw error;
+      } catch (e: any) {
+        alert(e?.message || "Konnte Plattform nicht ändern.");
+        // Zur Sicherheit neu laden
+        load();
+      }
+    } else {
+      // Reorder innerhalb derselben Spalte: nur lokal sortieren (kein Persist-Feld vorhanden)
+      // Wir sortieren eh nach scheduled_at; deshalb nur optische Verschiebung im UI:
+      // NOP – oder du könntest hier in Zukunft ein 'position' Feld einführen.
+    }
+  };
+
+  // Utils
+  const localDateTime = (iso: string) =>
+    new Date(iso).toLocaleString([], {
+      year: "2-digit",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+  return (
+    <div className="max-w-6xl mx-auto p-4">
+      <h1 className="text-xl font-semibold mb-4">Planner</h1>
+
+      {/* Add-Form */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
         <div>
           <label className="block text-xs uppercase mb-1">Plattform</label>
           <select
@@ -104,7 +216,7 @@ export default function Planner() {
         </div>
 
         <div>
-          <label className="block text-xs uppercase mb-1">Datum &amp; Zeit</label>
+          <label className="block text-xs uppercase mb-1">Datum & Zeit</label>
           <input
             type="datetime-local"
             className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-700"
@@ -116,7 +228,7 @@ export default function Planner() {
           </p>
         </div>
 
-        <div>
+        <div className="md:col-span-2">
           <label className="block text-xs uppercase mb-1">Notiz</label>
           <input
             className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-700"
@@ -127,36 +239,117 @@ export default function Planner() {
         </div>
       </div>
 
-      <button
-        onClick={add}
-        className="mb-4 px-4 py-2 rounded-xl border bg-black text-white dark:bg-white dark:text-black"
-        disabled={!uid || !dtLocal}
-      >
-        Hinzufügen
-      </button>
-
-      <div className="grid gap-3">
-        {rows.map((r) => (
-          <div key={r.id} className="p-3 rounded-xl border bg-white dark:bg-neutral-900">
-            <div className="text-sm font-medium">{r.platform.toUpperCase()}</div>
-            <div className="text-sm opacity-80">
-              {new Date(r.scheduled_at).toLocaleString()} {/* lokales TZ-Format */}
-            </div>
-            {r.note && <div className="text-sm mt-1">{r.note}</div>}
-            <div className="mt-2">
-              <button onClick={() => del(r.id)} className="px-3 py-1 rounded-lg border text-sm">
-                Löschen
-              </button>
-            </div>
-          </div>
-        ))}
-        {rows.length === 0 && !loading && (
-          <div className="p-3 rounded-xl border text-sm opacity-70">Noch keine Einträge.</div>
-        )}
-        {loading && (
-          <div className="p-3 rounded-xl border text-sm opacity-70">Lade Planner…</div>
-        )}
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={add}
+          className="px-4 py-2 rounded-xl border bg-black text-white dark:bg-white dark:text-black"
+          disabled={!uid || !dtLocal}
+        >
+          Hinzufügen
+        </button>
+        <button
+          onClick={load}
+          className="px-3 py-2 rounded-xl border"
+          disabled={loading}
+        >
+          {loading ? "Lade…" : "Refresh"}
+        </button>
+        {/* iCal-Export */}
+        <button
+          onClick={downloadIcs}
+          className="px-3 py-2 rounded-xl border"
+        >
+          Export .ics
+        </button>
       </div>
+
+      {/* DnD-Board */}
+      <DragDropContext onDragEnd={onDragEnd}>
+        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          {PLATFORMS.map((col) => {
+            const items = grouped[col.value] || [];
+            return (
+              <div key={col.value} className="rounded-2xl border p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold">{col.label}</h2>
+                  <span className="text-xs opacity-60">{items.length}</span>
+                </div>
+
+                <Droppable droppableId={col.value}>
+                  {(provided, snapshot) => (
+                    <div
+                      ref={provided.innerRef}
+                      {...provided.droppableProps}
+                      className={`min-h-[120px] rounded-xl p-2 transition ${
+                        snapshot.isDraggingOver
+                          ? "bg-neutral-100 dark:bg-neutral-800"
+                          : "bg-transparent"
+                      }`}
+                    >
+                      {items.map((r, idx) => (
+                        <Draggable
+                          key={`slot-${r.id}`}
+                          draggableId={`slot-${r.id}`}
+                          index={idx}
+                        >
+                          {(p, snap) => (
+                            <div
+                              ref={p.innerRef}
+                              {...p.draggableProps}
+                              {...p.dragHandleProps}
+                              className={`mb-2 rounded-xl border p-3 bg-white dark:bg-neutral-700 ${
+                                snap.isDragging ? "shadow-xl" : ""
+                              }`}
+                            >
+                              <div className="text-sm font-medium">
+                                {localDateTime(r.scheduled_at)}
+                              </div>
+                              {r.note && (
+                                <div className="text-sm opacity-80 mt-1">
+                                  {r.note}
+                                </div>
+                              )}
+                              <div className="mt-2 flex items-center justify-between">
+                                <span className="text-xs opacity-60">
+                                  ID #{r.id}
+                                </span>
+                                <button
+                                  onClick={() => del(r.id)}
+                                  className="text-xs px-2 py-1 rounded-lg border hover:bg-neutral-50 dark:hover:bg-neutral-600"
+                                  title="Löschen"
+                                >
+                                  Löschen
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </Draggable>
+                      ))}
+                      {provided.placeholder}
+                      {!items.length && (
+                        <div className="text-xs opacity-60 py-6 text-center">
+                          Ziehe Karten hierher
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </Droppable>
+              </div>
+            );
+          })}
+        </div>
+      </DragDropContext>
+
+      {!rows.length && !loading && (
+        <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">
+          Noch keine Einträge.
+        </div>
+      )}
+      {loading && (
+        <div className="p-3 rounded-xl border text-sm opacity-70 mt-3">
+          Lade Planner…
+        </div>
+      )}
     </div>
   );
 }

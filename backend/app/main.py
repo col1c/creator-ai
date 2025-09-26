@@ -1,5 +1,5 @@
 # app/main.py
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
 import os
 
@@ -434,3 +434,111 @@ async def delete_template(id: int = Path(...), request: Request = None):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(400, str(e))
+    
+    # --- ICS / Planner Export -----------------------------------------------------
+
+def _ics_escape(s: str) -> str:
+    if not s:
+        return ""
+    # RFC5545 rudimentär: Backslash, Komma, Semikolon, Newlines escapen
+    return (
+        s.replace("\\", "\\\\")
+         .replace(",", "\\,")
+         .replace(";", "\\;")
+         .replace("\r\n", "\\n")
+         .replace("\n", "\\n")
+    )
+
+def _ics_dt(dt_utc: datetime) -> str:
+    # Immer UTC → 'Z'
+    return dt_utc.strftime("%Y%m%dT%H%M%SZ")
+
+@router.get("/api/v1/planner/ical")
+async def planner_ical(
+    request: Request,
+    days: int = Query(30, ge=1, le=180),
+    filename: str = Query("creatorai_planner.ics")
+):
+    """
+    Exportiert alle Planner-Slots des eingeloggten Users im Zeitraum [jetzt, jetzt+days].
+    """
+    uid = await _uid_from_request(request)
+    now = datetime.now(timezone.utc)
+    until = now + timedelta(days=days)
+
+    # Slots für den aktuellen User laden (Supabase REST)
+    # Hinweis: wir nutzen supa._get (Async-Helper) wie im Projektstil
+    items = await supa._get(
+        "/rest/v1/planner_slots",
+        params={
+            "user_id": f"eq.{uid}",
+            "scheduled_at": f"gte.{now.isoformat()}",
+            "scheduled_at2": f"lte.{until.isoformat()}",
+            "order": "scheduled_at.asc",
+        }
+    )
+
+    # Einige Supabase-Gateways erwarten unterschiedliche Parameterkeys für mehrere Filter
+    # Fallback: falls oben nichts geliefert hat, Single-Range versuchen
+    if items is None or (isinstance(items, list) and len(items) == 0):
+        items = await supa._get(
+            "/rest/v1/planner_slots",
+            params={
+                "user_id": f"eq.{uid}",
+                "order": "scheduled_at.asc",
+            }
+        )
+        # lokal filtern (nur falls nötig)
+        if isinstance(items, list):
+            items = [
+                it for it in items
+                if it.get("scheduled_at") and
+                   now <= datetime.fromisoformat(it["scheduled_at"].replace("Z","+00:00")) <= until
+            ]
+
+    # ICS bauen
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//CreatorAI//Planner//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+
+    for it in (items or []):
+        sid = it.get("id")
+        platform = (it.get("platform") or "post").title()
+        note = it.get("note") or ""
+        # Zeit parsen (UTC erwartet / konvertieren)
+        try:
+            start = datetime.fromisoformat(str(it["scheduled_at"]).replace("Z","+00:00")).astimezone(timezone.utc)
+        except Exception:
+            continue
+        end = start + timedelta(minutes=30)  # Default-Dauer
+
+        summary = f"{platform} – CreatorAI Planner"
+        desc = note
+
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{sid}@creator-ai",
+            f"DTSTAMP:{_ics_dt(datetime.now(timezone.utc))}",
+            f"DTSTART:{_ics_dt(start)}",
+            f"DTEND:{_ics_dt(end)}",
+            f"SUMMARY:{_ics_escape(summary)}",
+            f"DESCRIPTION:{_ics_escape(desc)}",
+            "END:VEVENT",
+        ])
+
+    lines.append("END:VCALENDAR")
+    body = "\r\n".join(lines) + "\r\n"
+
+    # Download-Response
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+    return Response(
+        content=body,
+        media_type="text/calendar; charset=utf-8",
+        headers=headers
+    )
