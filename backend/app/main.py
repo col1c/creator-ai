@@ -4,7 +4,9 @@ from typing import Literal, Optional
 import os
 import logging
 import asyncio, json
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from .llm_stream_openrouter import stream_openrouter  # NEU
 
 from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -338,6 +340,7 @@ async def api_generate(
         "cached": False if not force_bypass else False,
     }
 # ---- POST Generate (SSE-Streaming) -----------------------------------------
+# ---- POST Generate (SSE-Streaming – echter Token-Stream) --------------------
 def _sse_pack(d: dict) -> bytes:
     return f"data: {json.dumps(d, ensure_ascii=False)}\n\n".encode("utf-8")
 
@@ -348,7 +351,6 @@ async def api_generate_stream(
     authorization: str | None = Header(default=None),
     force: str | None = Query(default=None),
 ):
-    # Rate limit vor Auth
     _rate_limit_or_429(request, None)
 
     user_id: Optional[str] = None
@@ -363,7 +365,7 @@ async def api_generate_stream(
     if user_id:
         _rate_limit_or_429(request, user_id)
 
-    # Brand-Voice (locker)
+    # Brand-Voice
     voice = None
     if user_id:
         try:
@@ -374,15 +376,13 @@ async def api_generate_stream(
         except Exception:
             voice = None
 
-    # Cache-Key / ggf. Bypass
     force_bypass = str(force or "").lower() in ("1","true","yes")
     cache_key = make_cache_key(user_id or "anon", payload.type, payload.model_dump())
 
     async def _gen():
-        # Start
         yield _sse_pack({"status":"start","type":payload.type})
 
-        # Cache HIT -> sofort streamen und beenden
+        # Cache-Hit?
         if user_id and not force_bypass:
             try:
                 hit = await supa.cache_get_by_key(cache_key, user_id)
@@ -393,34 +393,30 @@ async def api_generate_stream(
                 yield _sse_pack({"status":"end","engine":"cache","cached":True})
                 return
 
-        # Engine wählen
         mode = (payload.engine or "auto").lower()
         use_llm = (mode == "llm") or (mode == "auto" and bool(settings.OPENROUTER_API_KEY))
-        output_text: Optional[str] = None
         engine_used = "local"
-        model_name = None
+        model_name = getattr(settings, "OPENROUTER_MODEL", None) or "llm"
+        full_text = []
 
-        # 1) LLM (nicht echt token-streaming, aber wir chunken Zeilen)
         if use_llm:
-            yield _sse_pack({"status":"info","message":"LLM wird aufgerufen..."})
+            # ECHTER TOKEN-STREAM
             try:
-                variants = call_openrouter_retry(
+                async for token in stream_openrouter(
                     payload.type,
                     payload.topic.strip(),
                     payload.niche.strip(),
                     payload.tone.strip(),
                     voice,
-                )
-                output_text = _choose_output_from_variants(variants)
+                ):
+                    full_text.append(token)
+                    yield _sse_pack({"status":"chunk","text": token})
                 engine_used = "llm"
-                model_name = getattr(settings, "OPENROUTER_MODEL", None) or "llm"
             except Exception as e:
-                yield _sse_pack({"status":"warn","message":f"LLM Fallback: {str(e)[:120]}..."})
-                output_text = None
+                yield _sse_pack({"status":"warn","message": f'LLM stream failed, fallback to local: {str(e)[:120]}...'})
 
-        # 2) Lokal (Fallback)
-        if output_text is None:
-            yield _sse_pack({"status":"info","message":"Lokale Engine läuft..."})
+        if not full_text:
+            # Fallback: lokal (ein Block)
             try:
                 local = generate_local(
                     payload.type,
@@ -429,51 +425,32 @@ async def api_generate_stream(
                     payload.tone.strip(),
                     voice,
                 )
+                txt = ""
                 if isinstance(local, dict) and "output" in local:
-                    output_text = str(local["output"]).strip()
+                    txt = str(local["output"]).strip()
                 elif isinstance(local, dict) and "variants" in local:
-                    output_text = _choose_output_from_variants(local["variants"])
+                    txt = _choose_output_from_variants(local["variants"])
                 else:
-                    output_text = _choose_output_from_variants(local)
+                    txt = _choose_output_from_variants(local)
                 engine_used = "local"
+                full_text = [txt]
+                yield _sse_pack({"status":"chunk","text": txt})
             except ValueError as e:
                 yield _sse_pack({"status":"error","message":str(e)})
                 return
 
-        if not output_text:
-            yield _sse_pack({"status":"error","message":"Generation failed"})
-            return
+        final_text = "".join(full_text).strip()
 
-        # Chunking (Zeilen / Sätze) – streambar
-        # kurze, sanfte Chunk-Strategie:
-        parts = [p.strip() for p in output_text.replace("\r","").split("\n") if p.strip()]
-        if len(parts) <= 1:
-            # versuche Sätze
-            tmp = []
-            acc = ""
-            for ch in output_text:
-                acc += ch
-                if ch in ".!?":
-                    tmp.append(acc.strip())
-                    acc = ""
-            if acc.strip():
-                tmp.append(acc.strip())
-            parts = tmp or [output_text]
-
-        for p in parts:
-            yield _sse_pack({"status":"chunk","text": p})
-            await asyncio.sleep(0)  # sofort flushen
-
-        # Cache speichern (MISS)
-        if user_id:
+        # Cache + Usage (nur wenn user_id)
+        if user_id and final_text:
             try:
                 await supa.cache_insert({
                     "cache_key": cache_key,
                     "user_id": user_id,
                     "type": payload.type,
                     "payload": normalize_payload(payload.model_dump()),
-                    "output": output_text,
-                    "model": model_name or engine_used,
+                    "output": final_text,
+                    "model": model_name if engine_used=="llm" else "local",
                     "tokens_in": None,
                     "tokens_out": None,
                 })
@@ -492,6 +469,7 @@ async def api_generate_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
 
 
 
@@ -722,3 +700,122 @@ async def planner_ical(
 app.include_router(router)
 app.include_router(export_delete_router)  # NEU
 
+@app.websocket("/ws/generate")
+async def ws_generate(websocket: WebSocket):
+    # Token aus Query lesen
+    token = websocket.query_params.get("token", "")
+    uid = None
+    if token:
+        try:
+            user = await supa.get_user_from_token(token)
+            uid = user.get("id")
+        except Exception:
+            uid = None
+    if not uid:
+        await websocket.close(code=4401)  # Unauthorized
+        return
+
+    await websocket.accept()
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                data = json.loads(raw)
+            except Exception:
+                await websocket.send_text(json.dumps({"status":"error","message":"Invalid JSON"}))
+                continue
+
+            if data.get("cmd") != "generate":
+                await websocket.send_text(json.dumps({"status":"error","message":"Unknown cmd"}))
+                continue
+
+            typ = (data.get("type") or "script").lower()
+            topic = (data.get("topic") or "").strip()
+            niche = (data.get("niche") or "allgemein").strip()
+            tone = (data.get("tone") or "locker").strip()
+            engine = (data.get("engine") or "auto").lower()
+
+            if len(topic) < 2 or typ not in ("hook","script","caption","hashtags"):
+                await websocket.send_text(json.dumps({"status":"error","message":"Bad params"}))
+                continue
+
+            # Rate limit (pro User)
+            try:
+                ok, _, _ = check_allow(uid)
+                if not ok:
+                    await websocket.send_text(json.dumps({"status":"error","message":"Rate limit"}))
+                    continue
+            except Exception:
+                pass
+
+            # Brand-Voice
+            voice = None
+            try:
+                full = get_profile_full(uid) or {}
+                voice = full.get("brand_voice") or {}
+            except Exception:
+                pass
+
+            await websocket.send_text(json.dumps({"status":"start","type":typ}))
+
+            force_bypass = False
+            cache_key = make_cache_key(uid, typ, {"type":typ,"topic":topic,"niche":niche,"tone":tone,"engine":engine})
+            try:
+                hit = await supa.cache_get_by_key(cache_key, uid)
+            except Exception:
+                hit = None
+            if hit and hit.get("output") and not force_bypass:
+                await websocket.send_text(json.dumps({"status":"chunk","text":hit["output"]}))
+                await websocket.send_text(json.dumps({"status":"end","engine":"cache","cached":True}))
+                continue
+
+            use_llm = (engine == "llm") or (engine == "auto" and bool(settings.OPENROUTER_API_KEY))
+            engine_used = "local"
+            model_name = getattr(settings, "OPENROUTER_MODEL", None) or "llm"
+            full_text_parts = []
+
+            if use_llm:
+                try:
+                    async for token in stream_openrouter(typ, topic, niche, tone, voice):
+                        full_text_parts.append(token)
+                        await websocket.send_text(json.dumps({"status":"chunk","text":token}))
+                    engine_used = "llm"
+                except Exception as e:
+                    await websocket.send_text(json.dumps({"status":"warn","message": f"LLM stream failed: {str(e)[:120]}..."}))
+
+            if not full_text_parts:
+                try:
+                    local = generate_local(typ, topic, niche, tone, voice)
+                    if isinstance(local, dict) and "output" in local:
+                        txt = str(local["output"]).strip()
+                    elif isinstance(local, dict) and "variants" in local:
+                        txt = _choose_output_from_variants(local["variants"])
+                    else:
+                        txt = _choose_output_from_variants(local)
+                    engine_used = "local"
+                    full_text_parts = [txt]
+                    await websocket.send_text(json.dumps({"status":"chunk","text":txt}))
+                except Exception as e:
+                    await websocket.send_text(json.dumps({"status":"error","message":str(e)}))
+                    continue
+
+            final_text = "".join(full_text_parts).strip()
+            try:
+                await supa.cache_insert({
+                    "cache_key": cache_key,
+                    "user_id": uid,
+                    "type": typ,
+                    "payload": normalize_payload({"type":typ,"topic":topic,"niche":niche,"tone":tone,"engine":engine}),
+                    "output": final_text,
+                    "model": model_name if engine_used=="llm" else "local",
+                    "tokens_in": None,
+                    "tokens_out": None,
+                })
+                await supa.log_usage(uid, "generate", {"type": typ, "cache_key": cache_key, "ws": True})
+            except Exception:
+                pass
+
+            await websocket.send_text(json.dumps({"status":"end","engine":engine_used,"cached":False}))
+    except WebSocketDisconnect:
+        # Client hat getrennt: einfach beenden
+        pass

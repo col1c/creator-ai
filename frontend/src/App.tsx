@@ -1,3 +1,4 @@
+// src/App.tsx
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import { supabase } from "./lib/supabaseClient";
@@ -26,6 +27,9 @@ import Imprint from "./pages/Imprint";
 /* NEU: Streaming + Command-Palette (RELATIVE IMPORTS!) */
 import GenerateStream from "./components/GenerateStream";
 import CmdPalette from "./components/CmdPalette";
+
+/* NEU: WebSocket-Streaming */
+import GenerateWS from "./components/GenerateWS";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -522,7 +526,7 @@ function HomeApp() {
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
-          <p className="text-sm opacity-70">
+        <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
@@ -652,6 +656,11 @@ function HomeApp() {
         {/* NEU: Streaming (SSE) Box */}
         <div className="mt-6">
           <GenerateStream />
+        </div>
+
+        {/* NEU: WebSocket Generate Box */}
+        <div className="mt-6">
+          <GenerateWS />
         </div>
 
         {loading && (
