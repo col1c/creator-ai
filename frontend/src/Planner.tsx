@@ -1,3 +1,4 @@
+// frontend/src/Planner.tsx
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
@@ -108,10 +109,10 @@ export default function Planner() {
 
   const del = async (id: string | number) => {
     try {
-      const row = rows.find(r => String(r.id) === String(id));
+      const row = rows.find((r) => String(r.id) === String(id));
       const { error } = await supabase.from("planner_slots").delete().eq("id", id);
       if (error) throw error;
-      setRows((prev) => prev.filter((r) => r.id !== id));
+      setRows((prev) => prev.filter((r) => String(r.id) !== String(id)));
       await logEvent("delete", { where: "planner", id, row });
     } catch (e: any) {
       alert(e?.message || "Konnte Eintrag nicht löschen.");

@@ -1,18 +1,23 @@
 name: Planner Reminder
+
 on:
   schedule:
-    - cron: '0 6 * * *'  # 06:00 UTC ≈ 08:00 CET/09:00 CEST
-  workflow_dispatch: {}
+    - cron: "0 7 * * *"   # täglich 07:00 UTC
+  workflow_dispatch:
 
 jobs:
-  ping:
+  remind:
     runs-on: ubuntu-latest
     steps:
       - name: Call reminder endpoint
         env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}   # z.B. https://creator-ai-qqkr.onrender.com
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}   # identisch zu Render->Environment
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          API_BASE: ${{ secrets.RENDER_API_BASE }} # z.B. https://creator-ai-qqkr.onrender.com/api/v1
         run: |
-          curl -fsS -X POST "$BACKEND_URL/api/v1/planner/remind" \
+          set -e
+          if [ -z "$CRON_SECRET" ] || [ -z "$API_BASE" ]; then
+            echo "Missing CRON_SECRET or RENDER_API_BASE secret"; exit 1
+          fi
+          curl -sS -X POST "$API_BASE/planner/remind" \
             -H "X-Cron-Secret: $CRON_SECRET" \
-            --data-raw ''    # leerer Body; setzt Content-Length automatisch
+            -H "Content-Type: application/json"

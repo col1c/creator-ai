@@ -2,17 +2,17 @@
 from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
 import os
+import logging
 
 from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
+
+# Interne Module
 from . import supa
-from .ical import router as ical_router  # NEU
 from .reminder import router as reminder_router
-
 from .analytics import router as analytics_router  # NEU
-
 from .mailer import send_mail
 from .config import settings
 from .supa import get_upcoming_slots, mark_reminded
@@ -30,30 +30,51 @@ from .supa import (
 
 # NEU/GEÄNDERT: Cache & async-Logging via supa + Cache-Key-Helper
 from .cache import make_cache_key, normalize_payload
-from . import supa  # enthält async: cache_get_by_key, cache_insert, log_usage
 from .ratelimit import check_allow  # Rate limit helper
 
 
 app = FastAPI(title="Creator AI Backend", version="0.4.0")
-app.include_router(ical_router)
-app.include_router(analytics_router)               # NE
+
+# Router aus Modulen einhängen
+app.include_router(analytics_router)              # NEU
 app.include_router(reminder_router)
 
-
-# CORS breit fürs MVP (später per ENV einschränken)
+# ---------------- CORS (gehärtet) ----------------
+_allowed = settings.cors_allowed_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Cron-Secret", "X-Requested-With"],
     expose_headers=[
         "X-Engine",
         "X-Cache",
         "X-RateLimit-Limit",
         "X-RateLimit-Remaining",
-    ],  # wichtig fürs Frontend-Badge/Debug
+    ],
+    max_age=600,
 )
+
+# ------------- Startup-Report (nur Logs) -------------
+logger = logging.getLogger("uvicorn.error")
+
+@app.on_event("startup")
+def _startup_env_report():
+    feats = {
+        "llm": bool(settings.OPENROUTER_API_KEY),
+        "mail": bool(settings.MAILGUN_API_KEY and settings.MAILGUN_DOMAIN),
+        "cron": bool(settings.CRON_SECRET),
+    }
+    missing = []
+    if not settings.SUPABASE_URL: missing.append("SUPABASE_URL")
+    if not settings.SUPABASE_SERVICE_ROLE: missing.append("SUPABASE_SERVICE_ROLE")
+
+    logger.info("[startup] ENV=%s", settings.ENV)
+    logger.info("[startup] CORS allow_origins=%s", settings.cors_allowed_origins())
+    logger.info("[startup] features=%s", feats)
+    if missing:
+        logger.warning("[startup] Missing critical envs: %s", ", ".join(missing))
 
 # ---- universal OPTIONS handler (Preflight) ----
 @app.options("/{rest_of_path:path}")
@@ -352,6 +373,12 @@ def planner_remind(request: Request, x_cron_secret: str | None = Header(default=
     if not settings.CRON_SECRET or x_cron_secret != settings.CRON_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    # NEU: wenn Mail nicht konfiguriert, freundlich abbrechen
+    if not (settings.MAILGUN_API_KEY and settings.MAILGUN_DOMAIN):
+        slots = get_upcoming_slots(hours_ahead=26)
+        # kein sent, aber ok
+        return {"ok": True, "sent": 0, "checked": int(len(slots)), "mail": "disabled"}
+
     # Ladet Slots der nächsten ~24-26h
     slots = get_upcoming_slots(hours_ahead=26)
     sent = 0
@@ -379,7 +406,9 @@ def planner_remind(request: Request, x_cron_secret: str | None = Header(default=
 
     return {"ok": True, "sent": int(sent), "checked": int(len(slots))}
 
-router = APIRouter()  # falls schon vorhanden, diese Endpunkte an den bestehenden router anhängen
+
+# ---------------- Lokaler APIRouter (Templates + ICS) ----------------
+router = APIRouter()
 
 async def _uid_from_request(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
@@ -392,6 +421,7 @@ async def _uid_from_request(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return uid
 
+
 @router.get("/api/v1/templates")
 async def list_templates(
     request: Request,
@@ -402,6 +432,7 @@ async def list_templates(
     uid = await _uid_from_request(request)
     items = await supa.templates_list(uid, search=search, typ=typ, limit=limit)
     return {"items": items}
+
 
 @router.post("/api/v1/templates")
 async def create_template(request: Request):
@@ -420,6 +451,7 @@ async def create_template(request: Request):
     except Exception as e:
         raise HTTPException(400, str(e))
 
+
 @router.patch("/api/v1/templates/{id}")
 async def update_template(id: int = Path(...), request: Request = None):
     uid = await _uid_from_request(request)
@@ -434,6 +466,7 @@ async def update_template(id: int = Path(...), request: Request = None):
     except Exception as e:
         raise HTTPException(400, str(e))
 
+
 @router.delete("/api/v1/templates/{id}")
 async def delete_template(id: int = Path(...), request: Request = None):
     uid = await _uid_from_request(request)
@@ -442,9 +475,9 @@ async def delete_template(id: int = Path(...), request: Request = None):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(400, str(e))
-    
-    # --- ICS / Planner Export -----------------------------------------------------
 
+
+# --- ICS / Planner Export -----------------------------------------------------
 def _ics_escape(s: str) -> str:
     if not s:
         return ""
@@ -525,3 +558,6 @@ async def planner_ical(
         media_type="text/calendar; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+# Router registrieren (wichtig!)
+app.include_router(router)
