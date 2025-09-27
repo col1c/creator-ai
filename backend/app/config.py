@@ -47,3 +47,13 @@ class Settings(BaseModel):
         return out or ["http://localhost:5173"]
 
 settings = Settings()
+
+# ÄNDERUNG: unten anhängen
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO", "")      # z.B. price_123
+STRIPE_PRICE_TEAM = os.getenv("STRIPE_PRICE_TEAM", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://your-frontend.example.com")
+
+TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "")      # Cloudflare Turnstile
+INVITE_REQUIRED = os.getenv("INVITE_REQUIRED", "false").lower() == "true"

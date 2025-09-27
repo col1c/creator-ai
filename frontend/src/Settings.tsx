@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import ExportDeletePanel from "./components/ExportDeletePanel";
+import ReferralCard from "./components/ReferralCard";
 
 type BrandVoice = {
   tone?: "locker" | "seriös" | "motiviert" | "sachlich";
@@ -9,6 +10,8 @@ type BrandVoice = {
   forbidden?: string[];
   hashtags_base?: string[];
 };
+
+<ReferralCard />
 
 export default function Settings() {
   const [loading, setLoading] = useState(true);

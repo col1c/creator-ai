@@ -8,6 +8,13 @@ from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from .llm_stream_openrouter import stream_openrouter  # NEU
 
+# ÄNDERUNG: oben
+from .middleware_ratelimit import RateLimitMiddleware
+from .captcha import router as captcha_router
+from .invites import router as invites_router
+from .billing import router as billing_router
+from .planner_api import router as planner_api_router  # optional
+
 from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -819,3 +826,12 @@ async def ws_generate(websocket: WebSocket):
     except WebSocketDisconnect:
         # Client hat getrennt: einfach beenden
         pass
+
+    # ÄNDERUNG: app erstellen -> Middleware hinzufügen
+app.add_middleware(RateLimitMiddleware, per_sec=2, per_min=60)
+
+# ÄNDERUNG: Router mounten
+app.include_router(captcha_router)
+app.include_router(invites_router)
+app.include_router(billing_router)
+app.include_router(planner_api_router)  # optional

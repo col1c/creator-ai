@@ -8,6 +8,9 @@ import Planner from "./Planner";
 import Landing from "./Landing";
 import Onboarding from "./Onboarding";
 
+import Pricing from "./pages/Pricing";
+import Billing from "./pages/Billing";
+
 /* NEU: Templates-Seite (CRUD + Apply) */
 import Templates from "./Templates";
 
@@ -833,6 +836,9 @@ export default function App() {
       <Routes>
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/imprint" element={<Imprint />} />
+        // ÄNDERUNG: Router
+        <Route path="/pricing" element={<Pricing/>} />
+        <Route path="/billing" element={<Billing/>} />
         <Route path="*" element={<HomeApp />} />
       </Routes>
       <Footer />
