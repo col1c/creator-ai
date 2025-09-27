@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import { supabase } from "./lib/supabaseClient";
 import Auth from "./Auth";
 import Settings from "./Settings";
@@ -17,6 +18,10 @@ import LoadingCard from "./components/LoadingCard";
 
 /* NEU: Dashboard „Daily-3“ */
 import DashboardDaily3 from "./components/DashboardDaily3";
+
+/* NEU: Statische Seiten */
+import Privacy from "./pages/Privacy";
+import Imprint from "./pages/Imprint";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -137,7 +142,10 @@ const DISABLE_ONBOARDING =
       localStorage.getItem("disableOnboarding") === "1")) ||
   false;
 
-export default function App() {
+/* -------------------------------------------
+   Deine bisherige App als eigene Komponente
+   ------------------------------------------- */
+function HomeApp() {
   const [session, setSession] = useState<Session>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
@@ -827,5 +835,34 @@ export default function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+/* -------------------------------------------
+   Footer (immer sichtbar)
+   ------------------------------------------- */
+function Footer() {
+  return (
+    <footer className="mt-10 p-6 text-center text-xs opacity-70">
+      <Link to="/privacy" className="underline mx-2">Datenschutz</Link>
+      <span>·</span>
+      <Link to="/imprint" className="underline mx-2">Impressum</Link>
+    </footer>
+  );
+}
+
+/* -------------------------------------------
+   App-Wrapper mit Routing
+   ------------------------------------------- */
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/imprint" element={<Imprint />} />
+        <Route path="*" element={<HomeApp />} />
+      </Routes>
+      <Footer />
+    </BrowserRouter>
   );
 }

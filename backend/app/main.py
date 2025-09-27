@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Pa
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
+from .export_delete import router as export_delete_router  # NEU
 
 # Interne Module
 from . import supa
@@ -561,3 +562,5 @@ async def planner_ical(
 
 # Router registrieren (wichtig!)
 app.include_router(router)
+app.include_router(export_delete_router)  # NEU
+
