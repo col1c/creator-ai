@@ -23,6 +23,10 @@ import DashboardDaily3 from "./components/DashboardDaily3";
 import Privacy from "./pages/Privacy";
 import Imprint from "./pages/Imprint";
 
+/* NEU: Streaming + Command-Palette (RELATIVE IMPORTS!) */
+import GenerateStream from "./components/GenerateStream";
+import CmdPalette from "./components/CmdPalette";
+
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path}`;
@@ -53,40 +57,20 @@ function useDebounced<T>(value: T, delay = 300) {
 function splitListString(s: string): string[] {
   const txt = (s || "").replace(/\r\n/g, "\n").trim();
   if (!txt) return [];
-
-  // Bullets → Zeilen
-  let work = txt
-    .replace(/[•●▪︎·]/g, "\n")
-    .replace(/\n[ \t]*[-–—]\s*/g, "\n");
-
-  // Falls ohnehin Zeilen
+  let work = txt.replace(/[•●▪︎·]/g, "\n").replace(/\n[ \t]*[-–—]\s*/g, "\n");
   if (work.includes("\n")) {
-    return work
-      .split(/\n+/)
-      .map((x) => x.replace(/^[\-\–—•●]\s*/, "").trim())
-      .filter(Boolean);
+    return work.split(/\n+/).map((x) => x.replace(/^[\-\–—•●]\s*/, "").trim()).filter(Boolean);
   }
-
-  // Sätze (Punkt/!/? + Großbuchstabe/Zahl)
   let parts = work.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/);
-  if (parts.length > 1) {
-    return parts.map((p) => p.trim()).filter(Boolean);
-  }
-
-  // Listen in einer Zeile: Komma + Großbuchstabe/Zahl
+  if (parts.length > 1) return parts.map((p) => p.trim()).filter(Boolean);
   const commaParts = work.split(/,\s+(?=[A-ZÄÖÜ0-9])/);
-  if (commaParts.length >= 2) {
-    return commaParts.map((p) => p.trim()).filter(Boolean);
-  }
-
-  // Fallback: nur ein Eintrag
+  if (commaParts.length >= 2) return commaParts.map((p) => p.trim()).filter(Boolean);
   return [txt];
 }
 
 /** Egal was vom Backend kommt → Array<string> */
 function normalizeVariants(v: unknown): string[] {
   try {
-    // 1) Array
     if (Array.isArray(v)) {
       const flat = (v as any[]).flat();
       const list: string[] = [];
@@ -100,25 +84,18 @@ function normalizeVariants(v: unknown): string[] {
             (typeof anyItem.output === "string" && anyItem.output) ||
             "";
           list.push(cand || JSON.stringify(item));
-        } else if (item != null) {
-          list.push(String(item));
-        }
+        } else if (item != null) list.push(String(item));
       }
-      // Einzelner Eintrag könnte Liste enthalten
       if (list.length === 1) {
         const sub = splitListString(list[0]);
         if (sub.length > 1) return sub;
       }
       return list.map((s) => s.trim()).filter(Boolean);
     }
-
-    // 2) String
     if (typeof v === "string") {
       const arr = splitListString(v);
       return arr.length ? arr : [v.trim()];
     }
-
-    // 3) Objekt mit Textfeldern
     if (v && typeof v === "object") {
       const anyV = v as any;
       const s =
@@ -128,7 +105,6 @@ function normalizeVariants(v: unknown): string[] {
         "";
       return splitListString(String(s));
     }
-
     return [];
   } catch {
     return [];
@@ -291,7 +267,7 @@ function HomeApp() {
     fetchCredits();
   }, [fetchCredits]);
 
-  // Prefill aus Templates.Apply (localStorage Fallback)
+  // Prefill aus Templates.Apply
   useEffect(() => {
     try {
       const raw = localStorage.getItem("creatorai_prefill");
@@ -374,7 +350,6 @@ function HomeApp() {
         const engHeader = res.headers.get("X-Engine");
         if (engHeader) setEngine(engHeader === "llm" ? "LLM (Grok 4 Fast)" : engHeader);
 
-        // Token-Header (falls gesetzt)
         const tPrompt = Number(res.headers.get("X-Tokens-Prompt") || 0);
         const tComp = Number(res.headers.get("X-Tokens-Completion") || 0);
         const tTotal = Number(res.headers.get("X-Tokens-Total") || 0);
@@ -390,23 +365,17 @@ function HomeApp() {
 
         const text = await res.text().catch(() => "");
         const data = text ? JSON.parse(text) : {};
+        if (!res.ok) throw new Error(data?.detail || data?.message || `HTTP ${res.status}: ${res.statusText}`);
 
-        if (!res.ok) {
-          throw new Error(data?.detail || data?.message || `HTTP ${res.status}: ${res.statusText}`);
-        }
-
-        // Backend kann {output} oder {variants} liefern
         const arr = normalizeVariants(data?.variants ?? data?.output ?? "");
         setVariants(arr);
         fetchCredits().catch(() => {});
         return;
       } catch (e: any) {
-        // GET Fallback
         try {
           const params = new URLSearchParams({ type, topic, niche, tone });
           const url = `${api("/api/v1/generate_simple")}?${params.toString()}`;
           const data = await fetchJSON(url, { headers: buildHeaders(false) });
-
           const arr = normalizeVariants(data?.variants ?? data?.output ?? "");
           setVariants(arr);
           setEngine("local");
@@ -433,7 +402,6 @@ function HomeApp() {
     [canGenerate, type, topic, niche, tone, buildHeaders, fetchCredits, fetchJSON, loading]
   );
 
-  // Apply aus Templates (direkter Callback → sofortige Befüllung + optional Auto-Generate)
   const onApplyTemplate = useCallback(
     (prefill: { type: "hook" | "script" | "caption"; topic: string; niche: string; tone: string }) => {
       setType(prefill.type as GenType);
@@ -441,7 +409,6 @@ function HomeApp() {
       setNiche(prefill.niche || "");
       setTone(prefill.tone || "");
       setShowTemplates(false);
-      // sanft nach oben & direkt generieren, falls Topic gesetzt
       setTimeout(() => {
         window.scrollTo({ top: 0, behavior: "smooth" });
         if ((prefill.topic || "").trim().length > 1) {
@@ -452,7 +419,6 @@ function HomeApp() {
     [doGenerate]
   );
 
-  // Save
   const saveToLibrary = useCallback(
     async (variant: string) => {
       if (!session) {
@@ -471,7 +437,6 @@ function HomeApp() {
         if (error) throw error;
         await loadLibrary();
         alert("Gespeichert ✅");
-        // RLS-konform: user_id mitsenden
         await supabase.from("usage_log").insert({ user_id: uid, event: "save", meta: { type } });
       } catch (e: any) {
         alert(e?.message || "Speichern fehlgeschlagen");
@@ -482,7 +447,6 @@ function HomeApp() {
     [session, type, topic, niche, tone, loadLibrary]
   );
 
-  // Fav
   const toggleFavorite = useCallback(async (row: GenRow) => {
     try {
       const { error } = await supabase.from("generations").update({ favorite: !row.favorite }).eq("id", row.id);
@@ -515,11 +479,8 @@ function HomeApp() {
   );
 
   const EngineBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Engine: {engine}</span>;
-  const TokensBadge = () => (
-    <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>
-  );
+  const TokensBadge = () => <span className="px-2 py-1 rounded-lg border text-xs">Tokens: {tokenInfo.total ?? 0}</span>;
 
-  // ---- UI ----
   if (!session) {
     return (
       <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
@@ -562,8 +523,7 @@ function HomeApp() {
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
           <p className="text-sm opacity-70">
-            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API:{" "}
-            {API_BASE || "—"}
+            {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
             <button onClick={warmup} className="mt-2 px-3 py-1 rounded-lg border text-sm">
@@ -689,6 +649,11 @@ function HomeApp() {
           </button>
         </div>
 
+        {/* NEU: Streaming (SSE) Box */}
+        <div className="mt-6">
+          <GenerateStream />
+        </div>
+
         {loading && (
           <div className="mt-4">
             <LoadingCard />
@@ -702,7 +667,6 @@ function HomeApp() {
           </div>
         )}
 
-        {/* Ergebnisse */}
         {!loading && variants.length === 0 && !error && (
           <div className="mt-6">
             <EmptyState title="Noch nichts generiert" hint="Wähle oben Typ & fülle das Formular aus." />
@@ -863,6 +827,8 @@ export default function App() {
         <Route path="*" element={<HomeApp />} />
       </Routes>
       <Footer />
+      {/* NEU: Cmd+K Palette global */}
+      <CmdPalette />
     </BrowserRouter>
   );
 }

@@ -3,6 +3,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Literal, Optional
 import os
 import logging
+import asyncio, json
+from fastapi.responses import StreamingResponse
 
 from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -335,6 +337,162 @@ async def api_generate(
         "engine": engine_used,
         "cached": False if not force_bypass else False,
     }
+# ---- POST Generate (SSE-Streaming) -----------------------------------------
+def _sse_pack(d: dict) -> bytes:
+    return f"data: {json.dumps(d, ensure_ascii=False)}\n\n".encode("utf-8")
+
+@app.post("/api/v1/generate_stream")
+async def api_generate_stream(
+    payload: GenerateIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    force: str | None = Query(default=None),
+):
+    # Rate limit vor Auth
+    _rate_limit_or_429(request, None)
+
+    user_id: Optional[str] = None
+    user = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        try:
+            user = get_user_from_token(token) or {}
+            user_id = user.get("id")
+        except Exception:
+            user_id = None
+    if user_id:
+        _rate_limit_or_429(request, user_id)
+
+    # Brand-Voice (locker)
+    voice = None
+    if user_id:
+        try:
+            full = get_profile_full(user_id) or {}
+            voice = full.get("brand_voice") or {}
+            if isinstance(voice, dict) and voice.get("tone"):
+                payload.tone = (voice.get("tone") or payload.tone or "").strip()
+        except Exception:
+            voice = None
+
+    # Cache-Key / ggf. Bypass
+    force_bypass = str(force or "").lower() in ("1","true","yes")
+    cache_key = make_cache_key(user_id or "anon", payload.type, payload.model_dump())
+
+    async def _gen():
+        # Start
+        yield _sse_pack({"status":"start","type":payload.type})
+
+        # Cache HIT -> sofort streamen und beenden
+        if user_id and not force_bypass:
+            try:
+                hit = await supa.cache_get_by_key(cache_key, user_id)
+            except Exception:
+                hit = None
+            if hit and hit.get("output"):
+                yield _sse_pack({"status":"chunk","text": hit["output"]})
+                yield _sse_pack({"status":"end","engine":"cache","cached":True})
+                return
+
+        # Engine wählen
+        mode = (payload.engine or "auto").lower()
+        use_llm = (mode == "llm") or (mode == "auto" and bool(settings.OPENROUTER_API_KEY))
+        output_text: Optional[str] = None
+        engine_used = "local"
+        model_name = None
+
+        # 1) LLM (nicht echt token-streaming, aber wir chunken Zeilen)
+        if use_llm:
+            yield _sse_pack({"status":"info","message":"LLM wird aufgerufen..."})
+            try:
+                variants = call_openrouter_retry(
+                    payload.type,
+                    payload.topic.strip(),
+                    payload.niche.strip(),
+                    payload.tone.strip(),
+                    voice,
+                )
+                output_text = _choose_output_from_variants(variants)
+                engine_used = "llm"
+                model_name = getattr(settings, "OPENROUTER_MODEL", None) or "llm"
+            except Exception as e:
+                yield _sse_pack({"status":"warn","message":f"LLM Fallback: {str(e)[:120]}..."})
+                output_text = None
+
+        # 2) Lokal (Fallback)
+        if output_text is None:
+            yield _sse_pack({"status":"info","message":"Lokale Engine läuft..."})
+            try:
+                local = generate_local(
+                    payload.type,
+                    payload.topic.strip(),
+                    payload.niche.strip(),
+                    payload.tone.strip(),
+                    voice,
+                )
+                if isinstance(local, dict) and "output" in local:
+                    output_text = str(local["output"]).strip()
+                elif isinstance(local, dict) and "variants" in local:
+                    output_text = _choose_output_from_variants(local["variants"])
+                else:
+                    output_text = _choose_output_from_variants(local)
+                engine_used = "local"
+            except ValueError as e:
+                yield _sse_pack({"status":"error","message":str(e)})
+                return
+
+        if not output_text:
+            yield _sse_pack({"status":"error","message":"Generation failed"})
+            return
+
+        # Chunking (Zeilen / Sätze) – streambar
+        # kurze, sanfte Chunk-Strategie:
+        parts = [p.strip() for p in output_text.replace("\r","").split("\n") if p.strip()]
+        if len(parts) <= 1:
+            # versuche Sätze
+            tmp = []
+            acc = ""
+            for ch in output_text:
+                acc += ch
+                if ch in ".!?":
+                    tmp.append(acc.strip())
+                    acc = ""
+            if acc.strip():
+                tmp.append(acc.strip())
+            parts = tmp or [output_text]
+
+        for p in parts:
+            yield _sse_pack({"status":"chunk","text": p})
+            await asyncio.sleep(0)  # sofort flushen
+
+        # Cache speichern (MISS)
+        if user_id:
+            try:
+                await supa.cache_insert({
+                    "cache_key": cache_key,
+                    "user_id": user_id,
+                    "type": payload.type,
+                    "payload": normalize_payload(payload.model_dump()),
+                    "output": output_text,
+                    "model": model_name or engine_used,
+                    "tokens_in": None,
+                    "tokens_out": None,
+                })
+                await supa.log_usage(user_id, "generate", {"type": payload.type, "cache_key": cache_key, "stream": True})
+            except Exception:
+                pass
+
+        yield _sse_pack({"status":"end","engine":engine_used,"cached":False})
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 
 # ---- GET-Fallback (debug; KEINE Credits) + Rate-Limit ----
