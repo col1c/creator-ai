@@ -7,6 +7,9 @@ import asyncio, json
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from .llm_stream_openrouter import stream_openrouter  # NEU
+from .daily3 import router as daily3_router
+from .limits import router as limits_router
+from .ical import router as ical_router
 
 # ÄNDERUNG: oben
 from .middleware_ratelimit import RateLimitMiddleware
@@ -19,9 +22,8 @@ from fastapi import FastAPI, HTTPException, Header, Response, Query, Request, Pa
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
-from .export_delete import router as export_delete_router  # NEU
 
-from .stats import router as stats_router
+
 from .account import router as account_router
 from .report import router as report_router
 
@@ -709,7 +711,6 @@ async def planner_ical(
 
 # Router registrieren (wichtig!)
 app.include_router(router)
-app.include_router(export_delete_router)  # NEU
 
 @app.websocket("/ws/generate")
 async def ws_generate(websocket: WebSocket):
@@ -839,6 +840,8 @@ app.include_router(captcha_router)
 app.include_router(invites_router)
 app.include_router(billing_router)
 app.include_router(planner_api_router)  # optional
-app.include_router(stats_router)
 app.include_router(account_router)
 app.include_router(report_router)
+app.include_router(daily3_router)
+app.include_router(limits_router)
+app.include_router(ical_router)

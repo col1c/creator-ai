@@ -1,0 +1,23 @@
+# PATCH: backend/app/main.py
+
+# 1) iCal-Router einhängen
+#   Füge ganz oben bei den Imports ein:
+from .ical import router as ical_router
+
+#   Und beim Mounten der Router:
+app.include_router(ical_router)
+
+# 2) Doppelte Router AUSKOMMENTIEREN/ENTFERNEN
+#   Wenn du sowohl analytics.py als auch stats.py hast, nutze EINE Quelle.
+#   Empfehlung: analytics.py behalten, stats.py NICHT einbinden.
+#   Suche nach:
+#       from .stats import router as stats_router
+#       app.include_router(stats_router)
+#   -> Diese beiden Zeilen entfernen oder auskommentieren.
+
+#   Falls es zusätzlich export_delete.py gibt UND account.py:
+#   Empfehlung: account.py behalten.
+#   Suche nach:
+#       from .export_delete import router as export_delete_router
+#       app.include_router(export_delete_router)
+#   -> Diese beiden Zeilen entfernen oder auskommentieren.

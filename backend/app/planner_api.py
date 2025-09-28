@@ -1,7 +1,8 @@
 # app/planner_api.py
 from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional
-from .supa import _get_sync, _post_sync, _delete_sync, get_user_from_token, get_profile
+from .supa import update_sync, _get_sync, _post_sync, _delete_sync, get_user_from_token, get_profile
+
 
 router = APIRouter(prefix="/api/v1/planner", tags=["planner"])
 
@@ -38,4 +39,27 @@ def create_slot(payload: dict, user=Depends(require_user)):
 @router.delete("/slots/{slot_id}")
 def delete_slot(slot_id: int, user=Depends(require_user)):
     _delete_sync(f"/rest/v1/planner_slots?id=eq.{slot_id}")
+    return {"ok": True}
+
+def _require_auth(authorization: str | None):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "auth")
+
+@router.patch("/slots/{slot_id}")
+def update_slot(slot_id: int, payload: dict, authorization: str | None = Header(None)):
+    _require_auth(authorization)
+    # erlaubte Felder
+    data = {k:v for k,v in payload.items() if k in ("scheduled_at","platform","note","generation_id")}
+    if not data: return {"ok": True}
+    update_sync("/rest/v1/planner_slots", data, eq={"id": slot_id})
+    return {"ok": True}
+
+@router.post("/slots/reorder")
+def reorder_slots(payload: dict, authorization: str | None = Header(None)):
+    _require_auth(authorization)
+    items = payload.get("items") or []
+    for it in items:
+        sid = it.get("id"); when = it.get("scheduled_at")
+        if sid and when:
+            update_sync("/rest/v1/planner_slots", {"scheduled_at": when}, eq={"id": sid})
     return {"ok": True}

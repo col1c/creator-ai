@@ -3,6 +3,7 @@ from fastapi import APIRouter, Header, HTTPException, Response
 from datetime import datetime, timezone
 from io import BytesIO
 import json, requests, os, zipfile
+from typing import Optional
 
 from .supa import _get_sync, _delete_sync, get_user_from_token
 from .config import SUPABASE_URL, SUPABASE_SERVICE_ROLE
@@ -18,6 +19,11 @@ def require_uid(authorization: str | None) -> str:
     if not uid:
         raise HTTPException(401, "auth")
     return uid
+
+@router.post("/delete_account")
+def delete_account_post(payload: dict, authorization: Optional[str] = Header(None)):
+    # ruft den gleichen Code wie DELETE auf
+    return delete_account(payload, authorization)  # vorhandene Funktion wiederverwenden
 
 @router.get("/export")
 def export_data(authorization: str | None = Header(None)):

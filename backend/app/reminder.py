@@ -1,121 +1,125 @@
-# app/reminder.py
-from datetime import datetime, timezone, timedelta
-import os
-from typing import List, Dict, Any
+# backend/app/reminder.py
+from fastapi import APIRouter, Header, HTTPException
+from datetime import datetime, timedelta, timezone
+import requests, os
+from typing import List, Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Query
-from . import supa
+from .supa import _get_sync, update_sync, get_user_from_token
+from .config import MAILGUN_API_KEY, MAILGUN_DOMAIN, DAILY_EMAIL_FROM, CRON_SECRET
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1", tags=["planner-reminder"])
 
-# --- Helpers ---------------------------------------------------------------
+def _require_user(authorization: Optional[str]):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "auth")
+    token = authorization.split(" ", 1)[1]
+    user = get_user_from_token(token)
+    if not user or not user.get("id"):
+        raise HTTPException(401, "auth")
+    return user
 
-async def _uid_and_email_from_request(request: Request) -> tuple[str, str]:
-    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    token = auth.replace("Bearer", "").strip()
-    if not token:
-        raise HTTPException(401, "missing bearer token")
-    user_info = await supa.get_user_from_token(token)
-    uid = (user_info.get("user") or {}).get("id") or user_info.get("id")
-    email = (user_info.get("user") or {}).get("email") or user_info.get("email") or ""
-    if not uid:
-        raise HTTPException(401, "invalid token")
-    return uid, email
-
-def _fmt_local(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M UTC")
-
-async def _load_upcoming_slots(uid: str, hours: int) -> List[Dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    until = now + timedelta(hours=hours)
-    items = await supa._get(
-        "/rest/v1/planner_slots",
-        params={
-            "user_id": f"eq.{uid}",
-            "order": "scheduled_at.asc",
+def _send_mail(to_email: str, subject: str, text: str):
+    if not MAILGUN_API_KEY or not MAILGUN_DOMAIN or not DAILY_EMAIL_FROM:
+        # In dev environments we silently skip sending
+        return {"ok": True, "dev": True}
+    resp = requests.post(
+        f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+        auth=("api", MAILGUN_API_KEY),
+        data={
+            "from": DAILY_EMAIL_FROM,
+            "to": to_email,
+            "subject": subject,
+            "text": text,
         },
+        timeout=20,
     )
-    out: List[Dict[str, Any]] = []
-    for it in (items or []):
-        iso = it.get("scheduled_at")
-        if not iso:
-            continue
+    if resp.status_code >= 300:
+        raise HTTPException(500, f"mailgun: {resp.text}")
+    return {"ok": True}
+
+def _upcoming_slots_for_user(user_id: str, hours: int = 24) -> List[Dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=hours)
+    rows, _ = _get_sync("/rest/v1/planner_slots", {
+        "select": "id,platform,scheduled_at,note,reminder_sent",
+        "user_id": f"eq.{user_id}",
+        "scheduled_at": f"gte.{now.isoformat()}",
+        "order": "scheduled_at.asc",
+        "limit": 1000,
+    })
+    out = []
+    for r in rows or []:
         try:
-            dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00")).astimezone(timezone.utc)
+            ts = datetime.fromisoformat(r["scheduled_at"].replace("Z","+00:00"))
         except Exception:
             continue
-        if now <= dt <= until:
-            out.append({**it, "_dt": dt})
+        if ts <= horizon and not (r.get("reminder_sent") is True):
+            out.append(r)
     return out
 
-async def _send_via_mailgun(to_email: str, subject: str, text: str) -> Dict[str, Any]:
-    api_key = os.getenv("MAILGUN_API_KEY")
-    domain = os.getenv("MAILGUN_DOMAIN")
-    sender = os.getenv("MAILGUN_SENDER", f"CreatorAI <mailgun@{domain or 'example.com'}>")
+def _user_profile(user_id: str) -> Dict[str, Any]:
+    rows, _ = _get_sync("/rest/v1/users_public", {
+        "select":"user_id,email,handle",
+        "user_id": f"eq.{user_id}",
+        "limit": 1
+    })
+    return rows[0] if rows else {}
 
-    if not (api_key and domain):
-        return {"status": "noop", "reason": "missing_mailgun_env"}
+@router.post("/remind/self")
+def remind_self(authorization: Optional[str] = Header(None), hours: int = 24):
+    user = _require_user(authorization)
+    uid = user["id"]
+    prof = _user_profile(uid)
+    if not prof.get("email"):
+        # nothing to do
+        return {"ok": True, "sent": 0, "reason": "no-email"}
 
-    try:
-        import httpx
-    except Exception:
-        return {"status": "noop", "reason": "httpx_not_installed"}
-
-    url = f"https://api.mailgun.net/v3/{domain}/messages"
-    auth = ("api", api_key)
-    data = {"from": sender, "to": [to_email], "subject": subject, "text": text}
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(url, auth=auth, data=data)
-        return {"status": "ok" if r.status_code < 300 else "error", "code": r.status_code, "body": r.text}
-
-# --- Core ------------------------------------------------------------------
-
-async def _remind_core(request: Request, hours: int) -> Dict[str, Any]:
-    env = os.getenv("ENV", "dev")
-    # In prod blocken? -> auskommentiert lassen, falls du es brauchst:
-    # if env == "prod":
-    #     raise HTTPException(403, "Manual remind not allowed in production")
-
-    uid, email = await _uid_and_email_from_request(request)
-    slots = await _load_upcoming_slots(uid, hours)
-
-    lines = [f"Deine geplanten Posts (nächste {hours}h):", ""]
+    slots = _upcoming_slots_for_user(uid, hours=hours)
     if not slots:
-        lines.append("Keine Einträge im Zeitraum.")
-    else:
-        for it in slots:
-            platform = (it.get("platform") or "post").title()
-            note = it.get("note") or ""
-            dt = it["_dt"]
-            lines.append(f"• {platform} – {_fmt_local(dt)}  {('— ' + note) if note else ''}")
+        return {"ok": True, "sent": 0}
 
-    result = await _send_via_mailgun(
-        to_email=email or os.getenv("DEV_FALLBACK_EMAIL", ""),
-        subject="CreatorAI Planner – Erinnerung",
-        text="\n".join(lines),
-    )
+    # Build a simple text email
+    lines = ["Deine anstehenden Posts (nächste 24h):", ""]
+    for s in slots:
+        lines.append(f"- {s['platform']} @ {s['scheduled_at']}  {('— '+s['note']) if s.get('note') else ''}")
+    text = "\n".join(lines)
 
-    return {
-        "env": env,
-        "to": email or os.getenv("DEV_FALLBACK_EMAIL", ""),
-        "count": len(slots),
-        "mail": result,
-    }
+    _send_mail(prof["email"], "Reminder: Geplante Posts", text)
 
-# --- Routes (POST + Alias + GET-Fallback) ---------------------------------
+    # mark as reminded
+    for s in slots:
+        update_sync("/rest/v1/planner_slots", {"reminder_sent": True}, eq={"id": s["id"]})
+    return {"ok": True, "sent": len(slots)}
 
-# Ursprünglicher DEV-Path unter /planner/*
-@router.post("/api/v1/planner/remind/self")
-async def planner_remind_self_post(request: Request, hours: int = Query(24, ge=1, le=168)):
-    return await _remind_core(request, hours)
-
-# Alias OHNE /planner, um Kollisionen zu vermeiden
-@router.post("/api/v1/remind/self")
-async def remind_self_post(request: Request, hours: int = Query(24, ge=1, le=168)):
-    return await _remind_core(request, hours)
-
-# GET-Fallback, falls Proxy/Rules POST blocken
-@router.get("/api/v1/remind/self")
-async def remind_self_get(request: Request, hours: int = Query(24, ge=1, le=168)):
-    return await _remind_core(request, hours)
+@router.post("/planner/remind_all")
+def remind_all(x_cron_secret: Optional[str] = Header(None), hours: int = 24):
+    if not CRON_SECRET or x_cron_secret != CRON_SECRET:
+        raise HTTPException(403, "forbidden")
+    # load recent users (last 1000 created)
+    users, _ = _get_sync("/rest/v1/users_public", {
+        "select":"user_id,email",
+        "order":"created_at.desc",
+        "limit": 1000
+    })
+    total_sent = 0
+    for u in users or []:
+        uid = u["user_id"]
+        email = u.get("email")
+        if not email:
+            continue
+        slots = _upcoming_slots_for_user(uid, hours=hours)
+        if not slots:
+            continue
+        lines = ["Deine anstehenden Posts (nächste 24h):", ""]
+        for s in slots:
+            lines.append(f"- {s['platform']} @ {s['scheduled_at']}  {('— '+s['note']) if s.get('note') else ''}")
+        text = "\n".join(lines)
+        try:
+            _send_mail(email, "Reminder: Geplante Posts", text)
+            for s in slots:
+                update_sync("/rest/v1/planner_slots", {"reminder_sent": True}, eq={"id": s["id"]})
+            total_sent += len(slots)
+        except Exception:
+            # continue with others
+            pass
+    return {"ok": True, "sent": total_sent}
