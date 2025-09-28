@@ -1,33 +1,41 @@
-# NEU: Planner CRUD als REST (optional – FE nutzt bisher Supabase direkt)
-from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime
+# app/planner_api.py
+from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional
-from .supa import get_profile_sync, select_sync, insert_sync, delete_sync
+from .supa import _get_sync, _post_sync, _delete_sync, get_user_from_token, get_profile
 
 router = APIRouter(prefix="/api/v1/planner", tags=["planner"])
 
+def require_user(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "auth")
+    token = authorization.split(" ", 1)[1]
+    uid = get_user_from_token(token).get("id")
+    if not uid:
+        raise HTTPException(401, "auth")
+    prof = get_profile(uid) or {"user_id": uid}
+    return prof
+
 @router.get("/slots")
-def list_slots(user=Depends(get_profile_sync), date_from: Optional[str]=None, date_to: Optional[str]=None):
-    if not user: raise HTTPException(401, "auth")
-    query = f"/rest/v1/planner_slots?user_id=eq.{user['user_id']}&select=*&order=scheduled_at.asc"
-    # (optional) Filter nach Zeitraum
-    return select_sync(query)[0] or []
+def list_slots(user=Depends(require_user), date_from: Optional[str] = None, date_to: Optional[str] = None):
+    params = {
+        "user_id": f"eq.{user['user_id']}",
+        "select": "*",
+        "order": "scheduled_at.asc",
+    }
+    return _get_sync("/rest/v1/planner_slots", params)[0] or []
 
 @router.post("/slots")
-def create_slot(payload: dict, user=Depends(get_profile_sync)):
-    if not user: raise HTTPException(401, "auth")
+def create_slot(payload: dict, user=Depends(require_user)):
     data = {
         "user_id": user["user_id"],
         "platform": payload["platform"],
         "scheduled_at": payload["scheduled_at"],
         "generation_id": payload.get("generation_id"),
-        "note": payload.get("note")
+        "note": payload.get("note"),
     }
-    return insert_sync("/rest/v1/planner_slots", data)
+    return _post_sync("/rest/v1/planner_slots", data)
 
 @router.delete("/slots/{slot_id}")
-def delete_slot(slot_id: int, user=Depends(get_profile_sync)):
-    if not user: raise HTTPException(401, "auth")
-    # RLS schützt Delete
-    delete_sync("/rest/v1/planner_slots?id=eq.%d" % slot_id)
+def delete_slot(slot_id: int, user=Depends(require_user)):
+    _delete_sync(f"/rest/v1/planner_slots?id=eq.{slot_id}")
     return {"ok": True}
