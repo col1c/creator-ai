@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from .llm_stream_openrouter import stream_openrouter  # NEU
 from .daily3 import router as daily3_router
 from .limits import router as limits_router
+from .ical import router as ical_router
 
 # ÄNDERUNG: oben
 from .middleware_ratelimit import RateLimitMiddleware
@@ -843,3 +844,4 @@ app.include_router(account_router)
 app.include_router(report_router)
 app.include_router(daily3_router)
 app.include_router(limits_router)
+app.include_router(ical_router)
