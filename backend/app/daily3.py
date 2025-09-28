@@ -20,8 +20,7 @@ def _require_user(authorization: str | None):
 
 def _today_utc():
     now = datetime.now(timezone.utc)
-    start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-    return start
+    return datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
 
 def _gen_with_llm(niche: str, target: str, tone: str | None) -> List[Dict[str, Any]]:
     api_key = getattr(settings, "OPENROUTER_API_KEY", None)
@@ -29,7 +28,7 @@ def _gen_with_llm(niche: str, target: str, tone: str | None) -> List[Dict[str, A
     json_mode = str(getattr(settings, "LLM_JSON_MODE", "off")).lower() == "on"
 
     if not api_key or not model:
-        # simpler Fallback, wenn kein LLM konfiguriert ist
+        # Fallback ohne LLM
         base = [
             {"hook": f"3 Fehler in {niche}", "script": "Kurzes Skript …", "caption": "Heute lernst du …", "hashtags": ["#"+niche.replace(" ",""), "#tipps", "#creator"]},
             {"hook": f"Schneller {niche}-Hack", "script": "Kurzes Skript …", "caption": "So machst du es …", "hashtags": ["#"+niche.replace(" ",""), "#howto"]},
@@ -72,11 +71,9 @@ Gib NUR JSON aus.
     txt = r.json()["choices"][0]["message"]["content"]
     try:
         data = json.loads(txt)
-        # data kann Objekt mit Array sein oder direkt Array
         if isinstance(data, list):
             arr = data
         elif isinstance(data, dict):
-            # nimm das erste Value, falls das JSON ein Objekt mit Array ist
             arr = next(iter(data.values()), [])
             if not isinstance(arr, list):
                 arr = []
@@ -92,7 +89,6 @@ Gib NUR JSON aus.
             })
         return out[:3] if out else _gen_with_llm(niche, target, tone=None)
     except Exception:
-        # Wenn JSON parsing fehlschlägt: Fallback
         return _gen_with_llm(niche, target, tone=None)
 
 def _ensure_today(uid: str) -> List[Dict[str, Any]]:
@@ -121,7 +117,6 @@ def get_daily3(authorization: str | None = Header(None)):
     if len(today) >= 3:
         return today
 
-    # auto-refresh bis 3
     prof = _profile(uid)
     tone = (prof.get("brand_voice") or {}).get("tone", "locker")
     niche = prof.get("niche") or "Creator"
@@ -144,7 +139,6 @@ def refresh_my_daily3(authorization: str | None = Header(None)):
     uid = user["id"]
 
     start = _today_utc().isoformat()
-    # Bestehende Einträge für heute löschen (Service-Role)
     base = os.environ["SUPABASE_URL"].rstrip("/")
     sr = os.environ["SUPABASE_SERVICE_ROLE"]
     requests.delete(
@@ -160,7 +154,6 @@ def refresh_all(x_cron_secret: str | None = Header(None)):
     if not secret or x_cron_secret != secret:
         raise HTTPException(403, "forbidden")
 
-    # bis zu 200 Nutzer (einfacher Ansatz)
     users, _ = _get_sync("/rest/v1/users_public", {
         "select": "user_id,niche,target,brand_voice",
         "order": "created_at.desc",
@@ -171,14 +164,12 @@ def refresh_all(x_cron_secret: str | None = Header(None)):
     sr = os.environ["SUPABASE_SERVICE_ROLE"]
     for u in users or []:
         uid = u["user_id"]
-        # heute löschen
         start = _today_utc().isoformat()
         requests.delete(
             f"{base}/rest/v1/daily_ideas",
             headers={"apikey": sr, "Authorization": f"Bearer {sr}"},
             params={"user_id": f"eq.{uid}", "created_at": f"gte.{start}"}
         )
-        # 3 neue generieren
         bv = u.get("brand_voice") or {}
         packs = _gen_with_llm(u.get("niche") or "Creator", u.get("target") or "Anfänger", bv.get("tone", "locker"))
         for i in range(min(3, len(packs))):

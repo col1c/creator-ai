@@ -57,3 +57,7 @@ FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://your-frontend.exampl
 
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "")      # Cloudflare Turnstile
 INVITE_REQUIRED = os.getenv("INVITE_REQUIRED", "false").lower() == "true"
+OPENROUTER_API_KEY = settings.OPENROUTER_API_KEY
+OPENROUTER_MODEL = settings.OPENROUTER_MODEL
+LLM_JSON_MODE = settings.LLM_JSON_MODE
+CRON_SECRET = settings.CRON_SECRET
