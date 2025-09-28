@@ -21,6 +21,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from .export_delete import router as export_delete_router  # NEU
 
+from .stats import router as stats_router
+from .account import router as account_router
+from .report import router as report_router
+
 # Interne Module
 from . import supa
 from .reminder import router as reminder_router
@@ -835,3 +839,6 @@ app.include_router(captcha_router)
 app.include_router(invites_router)
 app.include_router(billing_router)
 app.include_router(planner_api_router)  # optional
+app.include_router(stats_router)
+app.include_router(account_router)
+app.include_router(report_router)

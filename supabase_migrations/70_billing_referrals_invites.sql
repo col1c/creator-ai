@@ -1,7 +1,7 @@
--- NEU: Billing/Plan-Felder, Invites & Referrals
--- Voraussetzung: pgcrypto (für gen_random_uuid) – in Supabase Standard aktiv.
+-- 70_billing_referrals_invites.sql
+-- Billing/Plan fields + Invites & Referrals. Requires pgcrypto (gen_random_uuid).
 
--- users_public erweitern
+-- users_public: billing & referrals fields
 alter table public.users_public
   add column if not exists plan text default 'free',                -- 'free' | 'pro' | 'team'
   add column if not exists invited boolean default false,
@@ -12,7 +12,7 @@ alter table public.users_public
   add column if not exists stripe_status text,
   add column if not exists pro_until timestamptz;
 
--- fallback referral_code einmalig setzen (kurz & menschenlesbar)
+-- one-time referral_code backfill (short & human-readable)
 update public.users_public
 set referral_code = lower(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))
 where referral_code is null;
@@ -27,7 +27,7 @@ create table if not exists public.invites (
 );
 alter table public.invites enable row level security;
 
--- Referrals (wer wen eingeladen hat)
+-- Referrals (who invited whom)
 create table if not exists public.referrals (
   id bigint generated always as identity primary key,
   referrer_user_id uuid references auth.users(id) on delete cascade,
@@ -36,14 +36,12 @@ create table if not exists public.referrals (
 );
 alter table public.referrals enable row level security;
 
--- Policies: invites nur vom Ersteller lesbar; inserts/updates per Service-Role (Backend)
+-- Policies: invites readable by creator; inserts/updates via service-role
 drop policy if exists "inv own_read" on public.invites;
 create policy "inv own_read" on public.invites
   for select using (auth.uid() = created_by);
 
--- Policies: referrals für beide Parteien lesbar
+-- Policies: referrals readable by both parties
 drop policy if exists "ref own_read" on public.referrals;
 create policy "ref own_read" on public.referrals
   for select using (auth.uid() = referrer_user_id or auth.uid() = referred_user_id);
-
--- Keine allgemeinen insert/update Policies -> Backend (Service Role) übernimmt.

@@ -7,7 +7,7 @@ create table if not exists public.users_public (
   handle text,
   niche text,
   target text,
-  email text,                                  -- optional, used by planner reminders
+  email text,                                  -- used by planner reminders
   brand_voice jsonb default '{}'::jsonb,
   monthly_credit_limit int default 50,
   onboarding_done boolean not null default false,
@@ -22,10 +22,12 @@ create table if not exists public.generations (
   input jsonb not null,             -- { topic, niche, tone, ... }
   output text not null,             -- single selected variant/text
   favorite boolean not null default false,
+  tokens_in int default 0,
+  tokens_out int default 0,
   created_at timestamptz default now()
 );
 
--- Optional: Templates (can be used later for CRUD templates)
+-- Templates (CRUD)
 create table if not exists public.templates (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,

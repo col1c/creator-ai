@@ -1,7 +1,6 @@
 -- 60_planner.sql
--- Optional planner feature (Option B). Includes FK to users_public and RLS.
+-- Planner table and RLS (with full CRUD policies).
 
--- Planner table (UTC timestamps recommended)
 create table if not exists public.planner_slots (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -22,11 +21,11 @@ exception when duplicate_object then
   null;
 end $$;
 
--- RLS & policies
 alter table public.planner_slots enable row level security;
 
 drop policy if exists "planner own_read"   on public.planner_slots;
 drop policy if exists "planner own_write"  on public.planner_slots;
+drop policy if exists "planner own_update" on public.planner_slots;
 drop policy if exists "planner own_delete" on public.planner_slots;
 
 create policy "planner own_read"
@@ -35,6 +34,11 @@ create policy "planner own_read"
 
 create policy "planner own_write"
   on public.planner_slots for insert
+  with check (auth.uid() = user_id);
+
+create policy "planner own_update"
+  on public.planner_slots for update
+  using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
 create policy "planner own_delete"

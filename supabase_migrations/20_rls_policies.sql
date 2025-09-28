@@ -1,6 +1,5 @@
 -- 20_rls_policies.sql
 -- Enable Row Level Security and define concise policies.
--- Safe to re-run: drop-if-exists is used before create.
 
 -- Enable RLS
 alter table public.users_public enable row level security;

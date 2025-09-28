@@ -1,7 +1,8 @@
--- Falls nicht vorhanden:
-create extension if not exists "uuid-ossp";
+-- Daily ideas table with per-user row-level security.sql
 
-create table if not exists daily_ideas (
+create extension if not exists "uuid-ossp" with schema extensions;
+
+create table if not exists public.daily_ideas (
   id uuid primary key default uuid_generate_v4(),
   user_id uuid not null,
   idea text not null,
@@ -9,19 +10,19 @@ create table if not exists daily_ideas (
   created_at timestamptz not null default now()
 );
 
-create index if not exists idx_daily_ideas_user_created on daily_ideas(user_id, created_at);
+create index if not exists idx_daily_ideas_user_created on public.daily_ideas(user_id, created_at);
 
-alter table daily_ideas enable row level security;
+alter table public.daily_ideas enable row level security;
 
-drop policy if exists ideas_select_own on daily_ideas;
-drop policy if exists ideas_insert_own on daily_ideas;
+drop policy if exists ideas_select_own on public.daily_ideas;
+drop policy if exists ideas_insert_own on public.daily_ideas;
 
 create policy ideas_select_own
-on daily_ideas
+on public.daily_ideas
 for select
 using (auth.uid() = user_id);
 
 create policy ideas_insert_own
-on daily_ideas
+on public.daily_ideas
 for insert
 with check (auth.uid() = user_id);

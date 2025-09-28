@@ -7,7 +7,7 @@ import Settings from "./Settings";
 import Planner from "./Planner";
 import Landing from "./Landing";
 import Onboarding from "./Onboarding";
-
+import Analytics from "./pages/Analytics";
 import Pricing from "./pages/Pricing";
 import Billing from "./pages/Billing";
 
@@ -33,6 +33,9 @@ import CmdPalette from "./components/CmdPalette";
 
 /* NEU: WebSocket-Streaming */
 import GenerateWS from "./components/GenerateWS";
+
+/* NEU: Missbrauch melden Modal */
+import ReportAbuseModal from "./components/ReportAbuseModal";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE as string;
 const API_BASE = (RAW_API_BASE || "").replace(/\/+$/, "");
@@ -529,7 +532,7 @@ function HomeApp() {
       <header className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Creator AI – Shortform Generator</h1>
-        <p className="text-sm opacity-70">
+          <p className="text-sm opacity-70">
             {warm ? "Backend bereit ✅" : "Backend wecken…"} • Eingeloggt als {session.user.email} • API: {API_BASE || "—"}
           </p>
           {!warm && (
@@ -828,20 +831,36 @@ function Footer() {
 }
 
 /* -------------------------------------------
-   App-Wrapper mit Routing
+   App-Wrapper mit Routing (+ globaler Report-Button)
    ------------------------------------------- */
 export default function App() {
+  const [reportOpen, setReportOpen] = useState(false);
+
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/imprint" element={<Imprint />} />
-        // ÄNDERUNG: Router
         <Route path="/pricing" element={<Pricing/>} />
         <Route path="/billing" element={<Billing/>} />
+        {/* Wichtig: spezifische Routen vor dem Catch-All */}
+        <Route path="/analytics" element={<Analytics />} />
         <Route path="*" element={<HomeApp />} />
       </Routes>
+
       <Footer />
+
+      {/* NEU: globaler floating Button „Missbrauch melden“ */}
+      <div className="fixed bottom-3 right-3 z-50">
+        <button
+          onClick={() => setReportOpen(true)}
+          className="px-3 py-2 rounded-xl border text-sm opacity-80 hover:opacity-100 bg-white dark:bg-neutral-900"
+        >
+          Missbrauch melden
+        </button>
+      </div>
+      {reportOpen && <ReportAbuseModal onClose={() => setReportOpen(false)} />}
+
       {/* NEU: Cmd+K Palette global */}
       <CmdPalette />
     </BrowserRouter>

@@ -1,3 +1,4 @@
+// frontend/src/Settings.tsx
 import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import ExportDeletePanel from "./components/ExportDeletePanel";
@@ -11,10 +12,10 @@ type BrandVoice = {
   hashtags_base?: string[];
 };
 
-<ReferralCard />
-
 export default function Settings() {
   const [loading, setLoading] = useState(true);
+
+  // Profil/Brand-Voice Felder
   const [handle, setHandle] = useState("");
   const [niche, setNiche] = useState("");
   const [target, setTarget] = useState("");
@@ -40,7 +41,13 @@ export default function Settings() {
       .eq("user_id", session.session.user.id)
       .maybeSingle();
 
-    if (!error && data) {
+    if (error) {
+      console.error(error);
+      setLoading(false);
+      return;
+    }
+
+    if (data) {
       setHandle(data.handle || "");
       setNiche(data.niche || "");
       setTarget(data.target || "");
@@ -56,6 +63,7 @@ export default function Settings() {
       setForbidden((v.forbidden || []).join("\n"));
       setHashtags((v.hashtags_base || ["#shorts", "#tiktok", "#reels"]).join("\n"));
     }
+
     setLoading(false);
   };
 
@@ -89,14 +97,25 @@ export default function Settings() {
         { onConflict: "user_id" }
       );
 
-    if (error) return alert(error.message);
+    if (error) {
+      console.error(error);
+      return alert(error.message);
+    }
     alert("Gespeichert ✅");
   };
 
-  if (loading) return <div className="p-4 rounded-xl border">Lade Einstellungen…</div>;
+  if (loading) {
+    return <div className="p-4 rounded-xl border">Lade Einstellungen…</div>;
+  }
 
   return (
     <div className="space-y-6">
+      {/* Referral / Einladungen */}
+      <div className="p-4 rounded-2xl border bg-white dark:bg-neutral-800">
+        <ReferralCard />
+      </div>
+
+      {/* Brand-Voice / Profil */}
       <div className="p-4 rounded-2xl border bg-white dark:bg-neutral-800 space-y-3">
         <h2 className="text-lg font-semibold">Einstellungen / Brand-Voice</h2>
 
@@ -133,7 +152,7 @@ export default function Settings() {
             <select
               className="w-full px-3 py-2 rounded-lg border bg-white dark:bg-neutral-700"
               value={tone}
-              onChange={(e) => setTone(e.target.value as any)}
+              onChange={(e) => setTone(e.target.value as BrandVoice["tone"])}
             >
               <option value="locker">locker</option>
               <option value="seriös">seriös</option>
@@ -186,7 +205,7 @@ export default function Settings() {
         </button>
       </div>
 
-      {/* NEU: Export (.zip) & Konto-Löschung */}
+      {/* Export (.zip) & Account-Löschung */}
       <ExportDeletePanel />
     </div>
   );
