@@ -1,83 +1,111 @@
 # backend/app/account.py
-from fastapi import APIRouter, Header, HTTPException, Response
-from datetime import datetime, timezone
-from io import BytesIO
-import json, requests, os, zipfile
-from typing import Optional
-
-from .supa import _get_sync, _delete_sync, get_user_from_token
-from .config import SUPABASE_URL, SUPABASE_SERVICE_ROLE
+from fastapi import APIRouter, HTTPException, Header, Response
+from fastapi.responses import JSONResponse
+from typing import Optional, Dict, Any
+import requests
+from .config import settings
+from .supa import get_user_from_token
 
 router = APIRouter(prefix="/api/v1", tags=["account"])
 
-def require_uid(authorization: str | None) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
+def _require_uid(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "auth")
-    token = authorization.split(" ", 1)[1]
+    token = authorization.split(" ", 1)[1].strip()
     user = get_user_from_token(token)
     uid = user.get("id")
     if not uid:
         raise HTTPException(401, "auth")
     return uid
 
-@router.post("/delete_account")
-def delete_account_post(payload: dict, authorization: Optional[str] = Header(None)):
-    # ruft den gleichen Code wie DELETE auf
-    return delete_account(payload, authorization)  # vorhandene Funktion wiederverwenden
+def _sr_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    h = {
+        "apikey": settings.SUPABASE_SERVICE_ROLE,
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE}",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+def _get_user_rows(table: str, uid: str) -> list[dict]:
+    r = requests.get(
+        f"{settings.SUPABASE_URL}/rest/v1/{table}",
+        headers=_sr_headers(),
+        params={"user_id": f"eq.{uid}", "select": "*", "order": "created_at.asc"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
 
 @router.get("/export")
-def export_data(authorization: str | None = Header(None)):
-    uid = require_uid(authorization)
+def export_account(authorization: Optional[str] = Header(None)):
+    uid = _require_uid(authorization)
 
-    # Pull all user-related tables
-    tables = {
-        "users_public": ("/rest/v1/users_public", {"select": "*", "user_id": f"eq.{uid}"}),
-        "generations":  ("/rest/v1/generations", {"select": "*", "user_id": f"eq.{uid}", "order": "created_at.desc", "limit": 10000}),
-        "templates":    ("/rest/v1/templates", {"select": "*", "user_id": f"eq.{uid}", "order": "created_at.desc", "limit": 10000}),
-        "planner_slots":("/rest/v1/planner_slots", {"select": "*", "user_id": f"eq.{uid}", "order": "scheduled_at.desc", "limit": 10000}),
-        "usage_log":    ("/rest/v1/usage_log", {"select": "*", "user_id": f"eq.{uid}", "order": "created_at.desc", "limit": 10000}),
-        "prompt_cache": ("/rest/v1/prompt_cache", {"select": "*", "user_id": f"eq.{uid}", "order": "created_at.desc", "limit": 10000}),
+    # users_public separat (single row)
+    pub = requests.get(
+        f"{settings.SUPABASE_URL}/rest/v1/users_public",
+        headers=_sr_headers(),
+        params={"user_id": f"eq.{uid}", "select": "*"},
+        timeout=30,
+    )
+    pub.raise_for_status()
+    profile = (pub.json() or [None])[0]
+
+    data = {
+        "profile": profile,
+        "generations": _get_user_rows("generations", uid),
+        "templates": _get_user_rows("templates", uid),
+        "planner_slots": _get_user_rows("planner_slots", uid),
+        "usage_log": _get_user_rows("usage_log", uid),
+        "daily_ideas": _get_user_rows("daily_ideas", uid) if settings.SUPABASE_URL else [],
+        "prompt_cache": _get_user_rows("prompt_cache", uid) if settings.SUPABASE_URL else [],
     }
 
-    mem = BytesIO()
-    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, (path, params) in tables.items():
-            rows, _ = _get_sync(path, params)
-            zf.writestr(f"{name}.json", json.dumps(rows or [], ensure_ascii=False, indent=2))
-    mem.seek(0)
-
-    fname = f"creator-ai-export-{datetime.now(timezone.utc).date().isoformat()}.zip"
-    return Response(
-        content=mem.read(),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": 'attachment; filename="creatorai_export.json"'},
     )
 
-@router.delete("/delete_account")
-def delete_account(authorization: str | None = Header(None)):
-    uid = require_uid(authorization)
+@router.post("/delete_account")
+def delete_account(authorization: Optional[str] = Header(None)):
+    uid = _require_uid(authorization)
 
-    # Delete rows (own data). RLS erlaubt delete für eigene Zeilen; Service-Role falls benötigt.
-    _delete_sync(f"/rest/v1/prompt_cache?user_id=eq.{uid}")
-    _delete_sync(f"/rest/v1/planner_slots?user_id=eq.{uid}")
-    _delete_sync(f"/rest/v1/templates?user_id=eq.{uid}")
-    _delete_sync(f"/rest/v1/generations?user_id=eq.{uid}")
-    _delete_sync(f"/rest/v1/usage_log?user_id=eq.{uid}")
-    _delete_sync(f"/rest/v1/users_public?user_id=eq.{uid}")
+    # Reihenfolge: Kindtabellen -> users_public -> auth user
+    def _del(table: str):
+        r = requests.delete(
+            f"{settings.SUPABASE_URL}/rest/v1/{table}",
+            headers=_sr_headers({"Prefer": "return=representation"}),
+            params={"user_id": f"eq.{uid}"},
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            raise HTTPException(400, f"delete {table} failed: {r.text}")
 
-    # Optional: Auth-User löschen (Admin API) – benötigt Service Role
-    if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
+    for table in ["planner_slots", "generations", "templates", "usage_log", "prompt_cache", "daily_ideas"]:
         try:
-            requests.delete(
-                f"{SUPABASE_URL}/auth/v1/admin/users/{uid}",
-                headers={
-                    "apikey": SUPABASE_SERVICE_ROLE,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-                },
-                timeout=15
-            )
+            _del(table)
         except Exception:
-            # Nicht hart fehlschlagen – Nutzer-Daten sind gelöscht; Auth kann nachgezogen werden
+            # tolerieren, falls Tabelle nicht existiert
             pass
 
-    return {"ok": True}
+    # users_public
+    r = requests.delete(
+        f"{settings.SUPABASE_URL}/rest/v1/users_public",
+        headers=_sr_headers({"Prefer": "return=representation"}),
+        params={"user_id": f"eq.{uid}"},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise HTTPException(400, f"delete users_public failed: {r.text}")
+
+    # auth admin delete (Service-Role)
+    ar = requests.delete(
+        f"{settings.SUPABASE_URL}/auth/v1/admin/users/{uid}",
+        headers=_sr_headers(),
+        timeout=30,
+    )
+    if ar.status_code not in (200, 204):
+        # nicht hart failen, aber melden
+        return {"ok": True, "auth_deleted": False, "auth_response": ar.text}
+
+    return {"ok": True, "auth_deleted": True}
